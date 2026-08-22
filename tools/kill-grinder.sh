@@ -4,6 +4,13 @@ set -u
 # This script lives at <project>/.grindr/tools/kill-grinder.sh.
 GRINDR_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PROJECT_ROOT=$(cd "$GRINDR_ROOT/.." && pwd)
+UNIT_SUFFIX=$(printf '%s' "$PROJECT_ROOT" | sha256sum | cut -c1-12)
+UNIT_NAME="grindr-worker-${UNIT_SUFFIX}"
+
+if systemctl --user is-active --quiet "$UNIT_NAME"; then
+    systemctl --user stop "$UNIT_NAME"
+    echo "Stopped ${UNIT_NAME}.service."
+fi
 
 find_project_processes() {
     local pattern="$1"

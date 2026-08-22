@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from pathlib import Path
 GRINDR_ROOT = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = GRINDR_ROOT.parent
 DEFAULT_CONFIG = GRINDR_ROOT / "config" / "config.yaml"
+LOG_DIRECTORY = GRINDR_ROOT / "logs"
 CODEX_COMMAND = "codex"
 MODEL_ALIASES = {"5.6 luna": "gpt-5.6-luna", "gpt-5.6-luna": "gpt-5.6-luna"}
 VALID_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
@@ -28,6 +30,16 @@ class CodexSettings:
 
     model: str
     effort: str
+
+
+def log_event(event: str, **fields: object) -> None:
+    """Append a non-sensitive event to the date-specific Codex log."""
+    now = __import__("datetime").datetime.now().astimezone()
+    LOG_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    log_path = LOG_DIRECTORY / f"codex-{now.date().isoformat()}.log"
+    payload = {"timestamp": now.isoformat(), "event": event, **fields}
+    with log_path.open("a", encoding="utf-8") as log_file:
+        log_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def read_settings(config_path: Path = DEFAULT_CONFIG) -> CodexSettings:
@@ -82,7 +94,6 @@ def build_command(settings: CodexSettings, output_path: Path) -> list[str]:
         "--json",
         "--sandbox",
         "workspace-write",
-        "--approve-for-me",
         "--model",
         settings.model,
         "-c",
@@ -98,16 +109,31 @@ def build_command(settings: CodexSettings, output_path: Path) -> list[str]:
 def run_codex(prompt: str, settings: CodexSettings) -> str:
     """Run Codex CLI and return its final response, raising on any failure."""
     if not shutil.which(CODEX_COMMAND):
+        log_event("codex_not_found")
         raise RuntimeError("Codex CLI was not found on PATH")
     with tempfile.TemporaryDirectory(prefix="grindr-codex-") as temporary_directory:
         output_path = Path(temporary_directory) / "last-message.txt"
+        command = build_command(settings, output_path)
+        log_event(
+            "invocation_started",
+            model=settings.model,
+            effort=settings.effort,
+            project_root=str(PROJECT_ROOT),
+        )
         result = subprocess.run(
-            build_command(settings, output_path),
+            command,
             cwd=PROJECT_ROOT,
             input=prompt,
             text=True,
             capture_output=True,
             check=False,
+        )
+        log_event(
+            "process_finished",
+            returncode=result.returncode,
+            stdout_tail=result.stdout[-1000:],
+            stderr_tail=result.stderr[-1000:],
+            output_file_created=output_path.exists(),
         )
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "no error output"
@@ -132,6 +158,7 @@ def main(arguments: list[str] | None = None) -> int:
             raise ValueError("prompt cannot be empty")
         print(run_codex(prompt, read_settings(args.config)))
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+        log_event("invocation_failed", reason=str(error))
         print(f"codex.py: {error}", file=sys.stderr)
         return 1
     return 0
