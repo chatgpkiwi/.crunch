@@ -118,7 +118,7 @@ Output JSON:
 
 Only record IDs, names, and statuses are returned.
 
-### `tools/codex.py`
+### `tools/codex.py` and `tools/aider.py`
 
 Input: plain-text prompt, as a positional argument or stdin.
 
@@ -132,7 +132,11 @@ Output: Codex CLI's final plain-text response. For `tools/grinder.py`, it must b
 {"task_status":"failed","fail_reason":"Reason for failure."}
 ```
 
-It reads `coding_agents.default` from `config/config.yaml`, requires provider `codex`, and uses the configured model and effort. It exits nonzero when Codex CLI crashes, fails, or has no final response.
+`codex.py` requires provider `codex` and uses the configured model and effort.
+`aider.py` requires provider `aider`, launches the installed Aider CLI in
+one-shot message mode, and passes it the configured model, OpenAI-compatible
+base URL, and API key. It does not make direct LLM HTTP calls. Both exit
+nonzero when their CLI fails or produces no final response.
 
 ### `tools/grinder.py`
 
@@ -150,7 +154,7 @@ or:
 {"task_id":1,"task_status":"fail","fail_reason":"Reason for failure."}
 ```
 
-It selects the earliest `new` task from the earliest phase in `new` or `in_progress` status, marks it `in_progress`, then continues until no `new` tasks remain. It logs events to `logs/YYYY-MM-DD.log`. A Codex CLI failure or invalid response exits nonzero and leaves the claimed task `in_progress` for inspection or retry.
+It selects the earliest `new` task from the earliest phase in `new` or `in_progress` status, marks it `in_progress`, then dispatches it to the `coding_agents.default.provider` adapter. It continues until no `new` tasks remain. It logs events to `logs/YYYY-MM-DD.log`. An adapter failure or invalid response exits nonzero and leaves the claimed task `in_progress` for inspection or retry.
 
 ### `tools/fix_task.py`
 
