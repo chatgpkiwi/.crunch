@@ -1,0 +1,10 @@
+# Coding-agent configuration for task execution.
+#
+# Add additional named agents under `coding_agents` when support for multiple
+# providers is introduced. The current implementation supports only `default`
+# and requires its provider to be Codex.
+coding_agents:
+  default:
+    provider: codex
+    model: "5.6 Luna"
+    effort: medium
