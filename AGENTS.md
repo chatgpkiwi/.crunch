@@ -161,8 +161,14 @@ Input JSON: `{"task_id":1,"task_instructions":"Replacement instructions."}`. It 
 After all known phases and tasks are recorded, launch the worker detached from ChatGPT:
 
 ```bash
-nohup python3 tools/grinder.py > logs/grinder-worker.out 2>&1 &
+./tools/start-grinder.sh
 ```
+
+The launcher runs the worker as a user systemd service. This keeps it alive
+when the command-execution host cleans up background child processes after the
+launching shell exits. On AppArmor-enabled Linux hosts, it also propagates the
+launcher's profile to the service so Codex's Bubblewrap workspace sandbox can
+initialize normally.
 
 Do not wait for it. Tell the user: "We're on it. Check back later." Query `tools/get_project_status.py` or `tools/get_project_summary.py '{"output":"simple"}'` when they return.
 

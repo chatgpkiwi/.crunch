@@ -15,6 +15,12 @@ The host project must have these commands available on `PATH`:
 - Codex CLI
 - Git
 
+To start the worker, run:
+
+```bash
+./tools/start-grinder.sh
+```
+
 To stop a running worker and its Codex child, run:
 
 ```bash

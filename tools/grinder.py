@@ -171,12 +171,19 @@ def _parse_codex_response(stdout: str) -> dict[str, str | None]:
 
 def run_codex(prompt: str) -> dict[str, str | None]:
     """Invoke codex.py with the assembled prompt and parse its JSON response."""
+    log_event("codex_invocation_started", prompt_length=len(prompt))
     result = subprocess.run(
         [sys.executable, str(CODEX_PROGRAM)],
         input=prompt,
         text=True,
         capture_output=True,
         check=False,
+    )
+    log_event(
+        "codex_process_finished",
+        returncode=result.returncode,
+        stdout_tail=result.stdout[-1000:],
+        stderr_tail=result.stderr[-1000:],
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "no error output"
@@ -227,7 +234,7 @@ def log_event(event: str, **fields: object) -> None:
     LOG_DIRECTORY.mkdir(parents=True, exist_ok=True)
     now = datetime.now().astimezone()
     payload = {"timestamp": now.isoformat(), "event": event, **fields}
-    log_path = LOG_DIRECTORY / f"{now.date().isoformat()}.log"
+    log_path = LOG_DIRECTORY / f"grinder-{now.date().isoformat()}.log"
     with log_path.open("a", encoding="utf-8") as log_file:
         log_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
@@ -238,6 +245,7 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
+        log_event("worker_started", database=str(args.database), pid=__import__("os").getpid())
         lock_file = acquire_worker_lock()
     except BlockingIOError:
         print("Another grinder worker is already running.", file=sys.stderr)
@@ -261,6 +269,7 @@ def main() -> int:
                 return 0
 
             task_id = int(record["task_id"])
+            log_event("task_found", task_id=task_id, phase_id=record["phase_id"])
             try:
                 claimed = claim_task(args.database, task_id)
             except sqlite3.Error as error:
@@ -270,6 +279,7 @@ def main() -> int:
             if not claimed:
                 log_event("task_claim_skipped", task_id=task_id)
                 continue
+            log_event("task_claimed", task_id=task_id, phase_id=record["phase_id"])
 
             try:
                 outcome = run_codex(build_prompt(record))
