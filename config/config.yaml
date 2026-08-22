@@ -7,4 +7,4 @@ coding_agents:
   default:
     provider: codex
     model: "5.6 Luna"
-    effort: medium
+    effort: low

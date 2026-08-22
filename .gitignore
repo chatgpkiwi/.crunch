@@ -1,0 +1,7 @@
+# Local grinder state may be edited by users, but the committed copy remains
+# available to every clone as the repository's baseline database.
+/database/grindr.db
+
+# Keep the directory in the repository, but ignore generated log contents.
+/logs/*
+!/logs/.gitkeep
