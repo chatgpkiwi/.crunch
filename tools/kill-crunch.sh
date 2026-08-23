@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -u
 
-# This script lives at <project>/.grindr/tools/kill-grinder.sh.
-GRINDR_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-PROJECT_ROOT=$(cd "$GRINDR_ROOT/.." && pwd)
+# This script lives at <project>/.crunch/tools/kill-crunch.sh.
+crunch_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+PROJECT_ROOT=$(cd "$crunch_ROOT/.." && pwd)
 UNIT_SUFFIX=$(printf '%s' "$PROJECT_ROOT" | sha256sum | cut -c1-12)
-UNIT_NAME="grindr-worker-${UNIT_SUFFIX}"
+UNIT_NAME="crunch-worker-${UNIT_SUFFIX}"
 
 if systemctl --user is-active --quiet "$UNIT_NAME"; then
     systemctl --user stop "$UNIT_NAME"
@@ -19,23 +19,22 @@ find_project_processes() {
         [ -n "$pid" ] || continue
         [ "$pid" -eq "$$" ] 2>/dev/null && continue
         cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
-        # grinder may inherit .grindr as its cwd; codex.py runs from the
+        # crunch may inherit .crunch as its cwd; codex.py runs from the
         # containing project. Both locations identify this worker instance.
-        { [ "$cwd" = "$PROJECT_ROOT" ] || [ "$cwd" = "$GRINDR_ROOT" ]; } \
+        { [ "$cwd" = "$PROJECT_ROOT" ] || [ "$cwd" = "$crunch_ROOT" ]; } \
             && printf '%s\n' "$pid"
     done < <(pgrep -f "$pattern" 2>/dev/null || true)
 }
 
-aider_pids=$(find_project_processes 'aider\.py' || true)
 codex_pids=$(find_project_processes 'codex\.py' || true)
-grinder_pids=$(find_project_processes 'grinder\.py' || true)
+crunch_pids=$(find_project_processes 'crunch\.py' || true)
 
-if [ -z "$aider_pids$codex_pids$grinder_pids" ]; then
-    echo "No Grinder, Aider, or Codex processes found for $PROJECT_ROOT."
+if [ -z "$codex_pids$crunch_pids" ]; then
+    echo "No crunch or Codex processes found for $PROJECT_ROOT."
     exit 0
 fi
 
-for pid in $aider_pids $codex_pids $grinder_pids; do
+for pid in $codex_pids $crunch_pids; do
     if kill "$pid" 2>/dev/null; then
         echo "Sent TERM to process $pid."
     fi

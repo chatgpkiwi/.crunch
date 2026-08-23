@@ -19,15 +19,15 @@ from datetime import datetime
 from pathlib import Path
 
 
-GRINDR_ROOT = Path(__file__).resolve().parent.parent
-PROJECT_ROOT = GRINDR_ROOT.parent
-DEFAULT_CONFIG = GRINDR_ROOT / "config" / "config.yaml"
-LOG_DIRECTORY = GRINDR_ROOT / "logs"
+crunch_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = crunch_ROOT.parent
+DEFAULT_CONFIG = crunch_ROOT / "config" / "config.yaml"
+LOG_DIRECTORY = crunch_ROOT / "logs"
 AIDER_COMMAND = "aider"
 MAX_INVALID_RESPONSE_RETRIES = 2
 EXCLUDED_PROJECT_DIRECTORIES = {
     ".git",
-    ".grindr",
+    ".crunch",
     ".venv",
     "venv",
     "node_modules",
@@ -133,11 +133,11 @@ def is_text_file(path: Path) -> bool:
 
 
 def project_files() -> list[Path]:
-    """Find editable text files in the project that contains ``.grindr``.
+    """Find editable text files in the project that contains ``.crunch``.
 
     Aider's repository map only includes Git-tracked files.  A project may not
     yet have a Git repository, or may have untracked files, so explicitly add
-    the parent project's text files.  Keep Grinder's own state and generated
+    the parent project's text files.  Keep crunch's own state and generated
     caches out of the coding session.
     """
     files: list[Path] = []
@@ -161,7 +161,7 @@ def build_command(
     settings: AiderSettings, prompt_path: Path, task_id: int, editable_files: list[Path]
 ) -> list[str]:
     """Build a one-shot Aider command that edits the project without commits."""
-    history_path = Path(".grindr") / "logs" / f"task-{task_id}-aider-chat-history.md"
+    history_path = Path(".crunch") / "logs" / f"task-{task_id}-aider-chat-history.md"
     command = [
         AIDER_COMMAND,
         "--model",
@@ -192,7 +192,7 @@ def extract_completion_response_from_history(history_path: Path) -> str:
 
     Aider's terminal transcript may wrap long JSON strings. Its chat history
     preserves the model's raw reply, while marking command output with ``>``
-    and the prompt with ``####``. Inspecting that latest section lets Grinder
+    and the prompt with ``####``. Inspecting that latest section lets crunch
     reject prose and Markdown fences without mistaking Aider's own status
     output for the model's response.
     """
@@ -237,7 +237,7 @@ def run_aider(prompt: str, settings: AiderSettings, task_id: int) -> str:
     if not shutil.which(AIDER_COMMAND):
         log_event("aider_not_found")
         raise RuntimeError("Aider CLI was not found on PATH")
-    with tempfile.TemporaryDirectory(prefix="grindr-aider-") as temporary_directory:
+    with tempfile.TemporaryDirectory(prefix="crunch-aider-") as temporary_directory:
         prompt_path = Path(temporary_directory) / "prompt.md"
         history_path = LOG_DIRECTORY / f"task-{task_id}-aider-chat-history.md"
         editable_files = project_files()
@@ -288,7 +288,7 @@ def main(arguments: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("prompt", nargs="?", help="prompt text; read stdin when omitted")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--task-id", type=int, required=True, help="Grindr task ID for the isolated Aider chat history file")
+    parser.add_argument("--task-id", type=int, required=True, help="crunch task ID for the isolated Aider chat history file")
     args = parser.parse_args(arguments)
     try:
         prompt = read_prompt(args.prompt)

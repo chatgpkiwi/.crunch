@@ -1,6 +1,6 @@
 # Coding-agent configuration for task execution.
 #
-# Grinder dispatches its `default` agent to the provider named below. Supported
+# crunch dispatches its `default` agent to the provider named below. Supported
 # providers are `aider` and `codex`.
 coding_agents:
   default:

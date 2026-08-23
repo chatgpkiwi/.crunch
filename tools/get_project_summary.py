@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_DATABASE = Path(__file__).resolve().parent.parent / "database" / "grindr.db"
+DEFAULT_DATABASE = Path(__file__).resolve().parent.parent / "database" / "crunch.db"
 SIMPLE_PHASE_FIELDS = {"deliverables", "architecture_contract", "acceptance_checklist"}
 SIMPLE_TASK_FIELDS = {"task_instructions", "test_results"}
 

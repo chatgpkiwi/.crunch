@@ -9,7 +9,7 @@ import sqlite3
 from pathlib import Path
 
 
-DEFAULT_DATABASE = Path(__file__).resolve().parent.parent / "database" / "grindr.db"
+DEFAULT_DATABASE = Path(__file__).resolve().parent.parent / "database" / "crunch.db"
 
 
 def get_project(database: Path = DEFAULT_DATABASE) -> dict[str, object] | None:

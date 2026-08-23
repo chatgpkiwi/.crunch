@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run eligible tasks through the configured coding-agent adapter."""
+"""Run eligible tasks through codex.py until no new tasks remain."""
 
 from __future__ import annotations
 
@@ -15,15 +15,11 @@ from typing import Any, TextIO
 
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DATABASE = ROOT / "database" / "grindr.db"
-ADAPTER_PROGRAMS = {
-    "codex": Path(__file__).resolve().parent / "codex.py",
-    "aider": Path(__file__).resolve().parent / "aider.py",
-}
-CONFIG_PATH = ROOT / "config" / "config.yaml"
+DEFAULT_DATABASE = ROOT / "database" / "crunch.db"
+CODEX_PROGRAM = Path(__file__).resolve().parent / "codex.py"
 UPDATE_TASK_PROGRAM = Path(__file__).resolve().parent / "update_task.py"
 LOG_DIRECTORY = ROOT / "logs"
-LOCK_PATH = LOG_DIRECTORY / "grinder.lock"
+LOCK_PATH = LOG_DIRECTORY / "crunch.lock"
 
 
 def acquire_worker_lock() -> TextIO:
@@ -132,27 +128,16 @@ You will code only one task in the phase below. The phase information is context
 
 ### Task Instructions
 
-{record['task_instructions']} 
-
-Ignore all files under .grindr directory. They are not part of your project. Do not read or update them. 
+{record['task_instructions']}
 
 ## Required Work
 
-This is an unattended development cycle. Implement the current task and run the
-relevant tests before responding. You have the complete task context and access
-to the workspace. Inspect files yourself when needed; do not ask for files,
-clarification, confirmation, or more information. Do not provide a plan,
-progress update, explanation, prose, Markdown, or code fence. If the task
-cannot be completed, report failure using the exact failure JSON below.
+Implement the current task and run the relevant tests before responding. Do not
+report success unless the task is implemented and its relevant tests pass.
 
-## Required Response - NON-NEGOTIABLE!
+## Required Response
 
-Do not emit anything until you have a final response!  
-Your response MUST be exactly one JSON payload. It MUST NOT contain Markdown, 
-code fence, question, prose, explanation, or requests. No other replies will be accepted. 
-
-Your entire reply must be exactly one of these JSON objects, with no
-surrounding text or formatting:
+Reply with exactly one JSON object and no surrounding text:
 
 ```json
 {{"task_status": "complete"}}
@@ -161,17 +146,16 @@ surrounding text or formatting:
 or:
 
 ```json
-{{"task_status": "failed", "fail_reason": "explain the reason for failure"}}
+{{"task_status": "failed", "fail_reason": "reason for failure"}}
 ```
-
 """
 
 
-def _parse_agent_response(stdout: str, provider: str) -> dict[str, str | None]:
-    """Validate the coding agent's required completion response."""
+def _parse_codex_response(stdout: str) -> dict[str, str | None]:
+    """Validate Codex's required completion response."""
     response = json.loads(stdout.strip())
     if not isinstance(response, dict):
-        raise ValueError(f"{provider}.py must return a JSON object")
+        raise ValueError("codex.py must return a JSON object")
     status = response.get("task_status")
     if status == "complete" and set(response) == {"task_status"}:
         return {"task_status": "complete", "fail_reason": None}
@@ -182,60 +166,33 @@ def _parse_agent_response(stdout: str, provider: str) -> dict[str, str | None]:
         and response["fail_reason"].strip()
     ):
         return {"task_status": "fail", "fail_reason": response["fail_reason"].strip()}
-    raise ValueError(f"{provider}.py response must be complete or failed with a non-empty fail_reason")
+    raise ValueError("codex.py response must be complete or failed with a non-empty fail_reason")
 
 
-def get_provider(config_path: Path = CONFIG_PATH) -> str:
-    """Read the active provider from the small coding-agent YAML section."""
-    try:
-        lines = config_path.read_text(encoding="utf-8").splitlines()
-    except OSError as error:
-        raise ValueError(f"cannot read configuration: {error}") from error
-    in_default = False
-    for line in lines:
-        content = line.split("#", 1)[0].strip()
-        if content == "default:":
-            in_default = True
-            continue
-        if in_default and line and not line.startswith("    "):
-            in_default = False
-        if in_default and content.startswith("provider:"):
-            provider = content.split(":", 1)[1].strip().strip("\"'")
-            if provider in ADAPTER_PROGRAMS:
-                return provider
-            raise ValueError(f"unsupported coding-agent provider: {provider or '(missing)'}")
-    raise ValueError("config.yaml must define coding_agents.default.provider")
-
-
-def run_agent(prompt: str, provider: str, task_id: int) -> dict[str, str | None]:
-    """Invoke the selected adapter and parse its required JSON response."""
-    program = ADAPTER_PROGRAMS[provider]
-    command = [sys.executable, str(program)]
-    if provider == "aider":
-        command.extend(["--task-id", str(task_id)])
-    log_event("agent_invocation_started", provider=provider, prompt_length=len(prompt))
+def run_codex(prompt: str) -> dict[str, str | None]:
+    """Invoke codex.py with the assembled prompt and parse its JSON response."""
+    log_event("codex_invocation_started", prompt_length=len(prompt))
     result = subprocess.run(
-        command,
+        [sys.executable, str(CODEX_PROGRAM)],
         input=prompt,
         text=True,
         capture_output=True,
         check=False,
     )
     log_event(
-        "agent_process_finished",
-        provider=provider,
+        "codex_process_finished",
         returncode=result.returncode,
         stdout_tail=result.stdout[-1000:],
         stderr_tail=result.stderr[-1000:],
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "no error output"
-        raise RuntimeError(f"{provider}.py exited with {result.returncode}: {detail[:1000]}")
-    return _parse_agent_response(result.stdout, provider)
+        raise RuntimeError(f"codex.py exited with {result.returncode}: {detail[:1000]}")
+    return _parse_codex_response(result.stdout)
 
 
 def update_task(database: Path, task_id: int, outcome: dict[str, str | None]) -> None:
-    """Persist the coding-agent outcome through the project's task-update tool."""
+    """Persist the Codex outcome through the project's task-update tool."""
     payload = {"task_id": task_id, **outcome}
     if outcome["task_status"] == "complete":
         payload["task_end_date"] = datetime.now().astimezone().isoformat()
@@ -277,7 +234,7 @@ def log_event(event: str, **fields: object) -> None:
     LOG_DIRECTORY.mkdir(parents=True, exist_ok=True)
     now = datetime.now().astimezone()
     payload = {"timestamp": now.isoformat(), "event": event, **fields}
-    log_path = LOG_DIRECTORY / f"grinder-{now.date().isoformat()}.log"
+    log_path = LOG_DIRECTORY / f"crunch-{now.date().isoformat()}.log"
     with log_path.open("a", encoding="utf-8") as log_file:
         log_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
@@ -291,10 +248,10 @@ def main() -> int:
         log_event("worker_started", database=str(args.database), pid=__import__("os").getpid())
         lock_file = acquire_worker_lock()
     except BlockingIOError:
-        print("Another grinder worker is already running.", file=sys.stderr)
+        print("Another crunch worker is already running.", file=sys.stderr)
         return 1
     except OSError as error:
-        print(f"Unable to acquire grinder worker lock: {error}", file=sys.stderr)
+        print(f"Unable to acquire crunch worker lock: {error}", file=sys.stderr)
         return 1
 
     try:
@@ -325,10 +282,9 @@ def main() -> int:
             log_event("task_claimed", task_id=task_id, phase_id=record["phase_id"])
 
             try:
-                provider = get_provider()
-                outcome = run_agent(build_prompt(record), provider, task_id)
+                outcome = run_codex(build_prompt(record))
             except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
-                log_event("agent_invocation_failed", task_id=task_id, phase_id=record["phase_id"], reason=str(error))
+                log_event("codex_invocation_failed", task_id=task_id, phase_id=record["phase_id"], reason=str(error))
                 print(f"Task {task_id} was not processed: {error}", file=sys.stderr)
                 return 1
 
@@ -355,9 +311,6 @@ def main() -> int:
             if phase_completed:
                 log_event("phase_completed", phase_id=record["phase_id"])
             print(json.dumps({"task_id": task_id, **outcome}))
-            if outcome["task_status"] == "fail":
-                log_event("worker_stopped_after_task_failure", task_id=task_id, phase_id=record["phase_id"])
-                return 1
     finally:
         release_worker_lock(lock_file)
 

@@ -13,12 +13,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-# This script is installed at <project>/.grindr/tools/codex.py.  Keep its
-# configuration in .grindr, but run Codex from the project that contains it.
-GRINDR_ROOT = Path(__file__).resolve().parent.parent
-PROJECT_ROOT = GRINDR_ROOT.parent
-DEFAULT_CONFIG = GRINDR_ROOT / "config" / "config.yaml"
-LOG_DIRECTORY = GRINDR_ROOT / "logs"
+# This script is installed at <project>/.crunch/tools/codex.py.  Keep its
+# configuration in .crunch, but run Codex from the project that contains it.
+crunch_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = crunch_ROOT.parent
+DEFAULT_CONFIG = crunch_ROOT / "config" / "config.yaml"
+LOG_DIRECTORY = crunch_ROOT / "logs"
 CODEX_COMMAND = "codex"
 MODEL_ALIASES = {"5.6 luna": "gpt-5.6-luna", "gpt-5.6-luna": "gpt-5.6-luna"}
 VALID_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
@@ -111,7 +111,7 @@ def run_codex(prompt: str, settings: CodexSettings) -> str:
     if not shutil.which(CODEX_COMMAND):
         log_event("codex_not_found")
         raise RuntimeError("Codex CLI was not found on PATH")
-    with tempfile.TemporaryDirectory(prefix="grindr-codex-") as temporary_directory:
+    with tempfile.TemporaryDirectory(prefix="crunch-codex-") as temporary_directory:
         output_path = Path(temporary_directory) / "last-message.txt"
         command = build_command(settings, output_path)
         log_event(
