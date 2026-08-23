@@ -59,6 +59,15 @@ if ! command -v systemd-run >/dev/null 2>&1; then
     exit 1
 fi
 
+# Sandboxed agent shells may be unable to reach the user's systemd bus.  The
+# worker cannot repair or bypass that restriction from Python: it must be
+# launched from the host or through the client's explicit approval flow.
+if ! systemctl --user show-environment >/dev/null 2>&1; then
+    echo "Unable to reach the user systemd manager." >&2
+    echo "Run this launcher from your normal shell, or approve it to run outside the agent sandbox." >&2
+    exit 1
+fi
+
 if systemctl --user is-active --quiet "$UNIT_NAME"; then
     echo "Grinder worker is already running as ${UNIT_NAME}.service"
     exit 0

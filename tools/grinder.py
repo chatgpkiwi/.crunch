@@ -132,16 +132,27 @@ You will code only one task in the phase below. The phase information is context
 
 ### Task Instructions
 
-{record['task_instructions']}
+{record['task_instructions']} 
+
+Ignore all files under .grindr directory. They are not part of your project. Do not read or update them. 
 
 ## Required Work
 
-Implement the current task and run the relevant tests before responding. Do not
-report success unless the task is implemented and its relevant tests pass.
+This is an unattended development cycle. Implement the current task and run the
+relevant tests before responding. You have the complete task context and access
+to the workspace. Inspect files yourself when needed; do not ask for files,
+clarification, confirmation, or more information. Do not provide a plan,
+progress update, explanation, prose, Markdown, or code fence. If the task
+cannot be completed, report failure using the exact failure JSON below.
 
-## Required Response
+## Required Response - NON-NEGOTIABLE!
 
-Reply with exactly one JSON object and no surrounding text:
+Do not emit anything until you have a final response!  
+Your response MUST be exactly one JSON payload. It MUST NOT contain Markdown, 
+code fence, question, prose, explanation, or requests. No other replies will be accepted. 
+
+Your entire reply must be exactly one of these JSON objects, with no
+surrounding text or formatting:
 
 ```json
 {{"task_status": "complete"}}
@@ -150,8 +161,9 @@ Reply with exactly one JSON object and no surrounding text:
 or:
 
 ```json
-{{"task_status": "failed", "fail_reason": "reason for failure"}}
+{{"task_status": "failed", "fail_reason": "explain the reason for failure"}}
 ```
+
 """
 
 
@@ -195,12 +207,15 @@ def get_provider(config_path: Path = CONFIG_PATH) -> str:
     raise ValueError("config.yaml must define coding_agents.default.provider")
 
 
-def run_agent(prompt: str, provider: str) -> dict[str, str | None]:
+def run_agent(prompt: str, provider: str, task_id: int) -> dict[str, str | None]:
     """Invoke the selected adapter and parse its required JSON response."""
     program = ADAPTER_PROGRAMS[provider]
+    command = [sys.executable, str(program)]
+    if provider == "aider":
+        command.extend(["--task-id", str(task_id)])
     log_event("agent_invocation_started", provider=provider, prompt_length=len(prompt))
     result = subprocess.run(
-        [sys.executable, str(program)],
+        command,
         input=prompt,
         text=True,
         capture_output=True,
@@ -311,7 +326,7 @@ def main() -> int:
 
             try:
                 provider = get_provider()
-                outcome = run_agent(build_prompt(record), provider)
+                outcome = run_agent(build_prompt(record), provider, task_id)
             except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
                 log_event("agent_invocation_failed", task_id=task_id, phase_id=record["phase_id"], reason=str(error))
                 print(f"Task {task_id} was not processed: {error}", file=sys.stderr)
@@ -340,6 +355,9 @@ def main() -> int:
             if phase_completed:
                 log_event("phase_completed", phase_id=record["phase_id"])
             print(json.dumps({"task_id": task_id, **outcome}))
+            if outcome["task_status"] == "fail":
+                log_event("worker_stopped_after_task_failure", task_id=task_id, phase_id=record["phase_id"])
+                return 1
     finally:
         release_worker_lock(lock_file)
 

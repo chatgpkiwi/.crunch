@@ -24,6 +24,35 @@ PROJECT_ROOT = GRINDR_ROOT.parent
 DEFAULT_CONFIG = GRINDR_ROOT / "config" / "config.yaml"
 LOG_DIRECTORY = GRINDR_ROOT / "logs"
 AIDER_COMMAND = "aider"
+MAX_INVALID_RESPONSE_RETRIES = 2
+EXCLUDED_PROJECT_DIRECTORIES = {
+    ".git",
+    ".grindr",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    "build",
+    "dist",
+}
+EXCLUDED_PROJECT_FILE_NAMES = {
+    ".aiderignore",
+}
+INVALID_RESPONSE_FAILURE_REASON = (
+    "Aider did not produce the required task-status JSON after the initial response and two format reminders."
+)
+FORMAT_REMINDER = """This is an unattended development cycle. Your previous reply was invalid.
+
+Reply now with exactly one JSON object and no other text, Markdown, code fence, question, explanation, or request for files. No other replies will be accepted. You must not ask for more information. Inspect the workspace and complete the assigned task using the existing context.
+
+Reply with exactly one of:
+{"task_status":"complete"}
+{"task_status":"failed","fail_reason":"specific reason"}
+"""
 
 
 @dataclass(frozen=True)
@@ -94,9 +123,46 @@ def read_prompt(value: str | None) -> str:
     return sys.stdin.read()
 
 
-def build_command(settings: AiderSettings, prompt_path: Path) -> list[str]:
+def is_text_file(path: Path) -> bool:
+    """Return whether a project file is safe to hand to Aider as source text."""
+    try:
+        with path.open("rb") as file_handle:
+            return b"\0" not in file_handle.read(8192)
+    except OSError:
+        return False
+
+
+def project_files() -> list[Path]:
+    """Find editable text files in the project that contains ``.grindr``.
+
+    Aider's repository map only includes Git-tracked files.  A project may not
+    yet have a Git repository, or may have untracked files, so explicitly add
+    the parent project's text files.  Keep Grinder's own state and generated
+    caches out of the coding session.
+    """
+    files: list[Path] = []
+    for path in PROJECT_ROOT.rglob("*"):
+        relative_path = path.relative_to(PROJECT_ROOT)
+        if any(part in EXCLUDED_PROJECT_DIRECTORIES for part in relative_path.parts):
+            continue
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or path.name in EXCLUDED_PROJECT_FILE_NAMES
+            or path.name.startswith(".aider.")
+        ):
+            continue
+        if is_text_file(path):
+            files.append(relative_path)
+    return sorted(files)
+
+
+def build_command(
+    settings: AiderSettings, prompt_path: Path, task_id: int, editable_files: list[Path]
+) -> list[str]:
     """Build a one-shot Aider command that edits the project without commits."""
-    return [
+    history_path = Path(".grindr") / "logs" / f"task-{task_id}-aider-chat-history.md"
+    command = [
         AIDER_COMMAND,
         "--model",
         settings.model,
@@ -104,6 +170,8 @@ def build_command(settings: AiderSettings, prompt_path: Path) -> list[str]:
         settings.openai_api_base,
         "--openai-api-key",
         settings.openai_api_key,
+        "--chat-history-file",
+        str(history_path),
         "--message-file",
         str(prompt_path),
         "--yes-always",
@@ -114,66 +182,105 @@ def build_command(settings: AiderSettings, prompt_path: Path) -> list[str]:
         "--no-check-update",
         "--no-analytics",
     ]
+    for file_path in editable_files:
+        command.extend(("--file", str(file_path)))
+    return command
 
 
-def extract_completion_response(output: str) -> str:
-    """Return the final Grinder completion object from Aider's transcript.
+def extract_completion_response_from_history(history_path: Path) -> str:
+    """Read the latest Aider reply and require exactly one unfenced JSON object.
 
-    Aider writes startup/status lines around the assistant's one-shot reply, so
-    forwarding stdout verbatim would violate Grinder's JSON-only contract.
+    Aider's terminal transcript may wrap long JSON strings. Its chat history
+    preserves the model's raw reply, while marking command output with ``>``
+    and the prompt with ``####``. Inspecting that latest section lets Grinder
+    reject prose and Markdown fences without mistaking Aider's own status
+    output for the model's response.
     """
-    decoder = json.JSONDecoder()
-    completions: list[dict[str, object]] = []
-    for index, character in enumerate(output):
-        if character != "{":
-            continue
-        try:
-            candidate, _ = decoder.raw_decode(output[index:])
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(candidate, dict):
-            continue
-        if candidate == {"task_status": "complete"}:
-            completions.append(candidate)
-        elif (
-            set(candidate) == {"task_status", "fail_reason"}
-            and candidate.get("task_status") == "failed"
-            and isinstance(candidate.get("fail_reason"), str)
-            and candidate["fail_reason"].strip()
-        ):
-            completions.append(candidate)
-    if not completions:
-        raise RuntimeError("Aider completed without the required task-status JSON response")
-    return json.dumps(completions[-1], ensure_ascii=False)
+    try:
+        latest_session = history_path.read_text(encoding="utf-8").rsplit("# aider chat started", 1)[-1]
+    except OSError as error:
+        raise RuntimeError(f"cannot read Aider chat history: {error}") from error
+    _, separator, latest_session = latest_session.partition("\n")
+    if not separator:
+        raise RuntimeError("Aider chat history does not contain a completed session")
+
+    reply_lines = [
+        line.strip()
+        for line in latest_session.splitlines()
+        if line.strip()
+        and not line.lstrip().startswith(("#", ">", "####"))
+    ]
+    if len(reply_lines) != 1:
+        raise RuntimeError("Aider completed without exactly one JSON task-status reply")
+
+    try:
+        response = json.loads(reply_lines[0])
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Aider completed without exactly one JSON task-status reply") from error
+    if response == {"task_status": "complete"}:
+        return json.dumps(response, ensure_ascii=False)
+    if (
+        isinstance(response, dict)
+        and set(response) == {"task_status", "fail_reason"}
+        and response.get("task_status") == "failed"
+        and isinstance(response.get("fail_reason"), str)
+        and response["fail_reason"].strip()
+    ):
+        return json.dumps(response, ensure_ascii=False)
+    raise RuntimeError("Aider completed without exactly one JSON task-status reply")
 
 
-def run_aider(prompt: str, settings: AiderSettings) -> str:
+def run_aider(prompt: str, settings: AiderSettings, task_id: int) -> str:
     """Run Aider and return its textual one-shot response."""
+    if task_id < 1:
+        raise ValueError("task_id must be a positive integer")
     if not shutil.which(AIDER_COMMAND):
         log_event("aider_not_found")
         raise RuntimeError("Aider CLI was not found on PATH")
     with tempfile.TemporaryDirectory(prefix="grindr-aider-") as temporary_directory:
         prompt_path = Path(temporary_directory) / "prompt.md"
-        prompt_path.write_text(prompt, encoding="utf-8")
-        command = build_command(settings, prompt_path)
-        log_event("invocation_started", model=settings.model, project_root=str(PROJECT_ROOT))
-        result = subprocess.run(
-            command,
-            cwd=PROJECT_ROOT,
-            text=True,
-            capture_output=True,
-            check=False,
+        history_path = LOG_DIRECTORY / f"task-{task_id}-aider-chat-history.md"
+        editable_files = project_files()
+        prompts = [prompt, *([FORMAT_REMINDER] * MAX_INVALID_RESPONSE_RETRIES)]
+        for attempt, current_prompt in enumerate(prompts):
+            prompt_path.write_text(current_prompt, encoding="utf-8")
+            command = build_command(settings, prompt_path, task_id, editable_files)
+            log_event(
+                "invocation_started",
+                model=settings.model,
+                project_root=str(PROJECT_ROOT),
+                task_id=task_id,
+                editable_file_count=len(editable_files),
+                chat_history_file=str(history_path),
+                attempt=attempt + 1,
+                format_retry=attempt > 0,
+            )
+            result = subprocess.run(
+                command,
+                cwd=PROJECT_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            log_event(
+                "process_finished",
+                returncode=result.returncode,
+                stdout_tail=result.stdout[-1000:],
+                stderr_tail=result.stderr[-1000:],
+                attempt=attempt + 1,
+            )
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip() or "no error output"
+                raise RuntimeError(f"Aider exited with {result.returncode}: {detail[:1000]}")
+            try:
+                return extract_completion_response_from_history(history_path)
+            except RuntimeError:
+                log_event("invalid_completion_response", task_id=task_id, attempt=attempt + 1)
+
+        return json.dumps(
+            {"task_status": "failed", "fail_reason": INVALID_RESPONSE_FAILURE_REASON},
+            ensure_ascii=False,
         )
-        log_event(
-            "process_finished",
-            returncode=result.returncode,
-            stdout_tail=result.stdout[-1000:],
-            stderr_tail=result.stderr[-1000:],
-        )
-        if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip() or "no error output"
-            raise RuntimeError(f"Aider exited with {result.returncode}: {detail[:1000]}")
-        return extract_completion_response(result.stdout)
 
 
 def main(arguments: list[str] | None = None) -> int:
@@ -181,12 +288,13 @@ def main(arguments: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("prompt", nargs="?", help="prompt text; read stdin when omitted")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--task-id", type=int, required=True, help="Grindr task ID for the isolated Aider chat history file")
     args = parser.parse_args(arguments)
     try:
         prompt = read_prompt(args.prompt)
         if not prompt.strip():
             raise ValueError("prompt cannot be empty")
-        print(run_aider(prompt, read_settings(args.config)))
+        print(run_aider(prompt, read_settings(args.config), args.task_id))
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         log_event("invocation_failed", reason=str(error))
         print(f"aider.py: {error}", file=sys.stderr)

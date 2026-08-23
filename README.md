@@ -34,14 +34,6 @@ git clone git@github.com:chatgpkiwi/codex-grinder.git
       "Read .grindr/AGENTS.md" 
 6. Finally, chat with Codex while it has your project open. 
 
-## Advanced
-
-Codex starts the worker automatically, but if you must manually start it or stop it, you can run:
-
-```bash
-./tools/start-grinder.sh
-```
-
-```bash
-./tools/kill-grinder.sh
-```
+Once it is installed, describe the work you want done in a project conversation.
+Grindr turns that conversation into a concrete plan and carries out the work in
+the background while preserving a clear record of progress.
