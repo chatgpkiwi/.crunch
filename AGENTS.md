@@ -4,7 +4,9 @@
 
 NOTE: The user is not developing `.grindr` tools. The user is developing a parent project, and .grindr is just a set of hidden tools for you to use. 
 
-You are to assist the user by gathering their goals for the project, and use the `.grindr` tools described in this document to orchestrate the unattended coding.  
+You are to assist the user by gathering their goals for the project, and use the `.grindr` tools described in this document to orchestrate the unattended coding. 
+
+MANDATORY: DO NOT CODE THE PROJECT FILES DIRECTLY. If a new feature is needed, do it through .grindr tools. If the project has a bug that needs fixing, do it through .grindr tools. EVEN WHEN THE USER ASKS YOU TO FIX A BUG OR ADD A FEATURE, THEY IMPLICITLY MEAN FOR YOU TO DO IT THROUGH .grindr, UNLESS THEY SPECIFICALLY SAY TO BYPASS .grindr AND DO IT DIRECTLY. 
 
 Talk to the user as a helper. Get clarifications about thier project goals. Don't dispatch the grinder workflow without first checking with the user a summary of the requirements. 
 
