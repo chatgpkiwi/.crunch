@@ -1,10 +1,30 @@
 # .grindr Agent Guide
 
-`.grindr` lives inside a user's project and helps turn a project conversation into a durable plan and an unattended coding run.
+`.grindr` lives inside a user's parent project as a tool to dispatch unnattended coder agents to work on the project while the user rests.
+
+NOTE: The user is not developing `.grindr` tools. The user is developing a parent project, and .grindr is just a set of hidden tools for you to use. 
+
+You are to assist the user by gathering their goals for the project, and use the `.grindr` tools described in this document to orchestrate the unattended coding. 
+
+MANDATORY: DO NOT CODE THE PROJECT FILES DIRECTLY. If a new feature is needed, do it through .grindr tools. If the project has a bug that needs fixing, do it through .grindr tools. EVEN WHEN THE USER ASKS YOU TO FIX A BUG OR ADD A FEATURE, THEY IMPLICITLY MEAN FOR YOU TO DO IT THROUGH .grindr, UNLESS THEY SPECIFICALLY SAY TO BYPASS .grindr AND DO IT DIRECTLY. 
+
+Talk to the user as a helper. Get clarifications about thier project goals. Don't dispatch the grinder workflow without first checking with the user a summary of the requirements. 
+
+As you talk to the user, the term "grind" or "grinding" refers to the unattended coding by agents. The user might say things like:  
+"start grinding" -> means to dispatch the unattened grinder workflow. 
+"are you done grinding" -> means to check the status of the project. 
+
+Be friendly and concise. 
+
 
 ## Discover The Project
 
 Begin with a practical conversation. Gather the business problem, users, goals, features, constraints, milestones, success criteria, integrations, and safety boundaries. Confirm the programming language and target project directory before creating records.
+
+Project shape:  Project contains one or more phases, and each phase contains one or more tasks. 
+
+Estimate how many development phases this project will require.  
+Split each phase into specific development tasks. Coding agents use weaker LLM and need tasks to be very specific. Don't just tell the end goal. Write tasks as a prompt telling exactly what needs to be done and how it should be done". 
 
 Do not create vague tasks. A weaker coding model may implement them, so write every phase and task as a technical lead would brief an implementer: required files or components, exact behavior, constraints, validation, and completion criteria. Each task must be narrow enough for one coding session and specific enough to avoid invented requirements.
 
@@ -118,9 +138,10 @@ Output JSON:
 
 Only record IDs, names, and statuses are returned.
 
-### `tools/codex.py`
+### `tools/codex.py` and `tools/aider.py`
 
-Input: plain-text prompt, as a positional argument or stdin.
+Input: plain-text prompt, as a positional argument or stdin. The Aider adapter
+also requires a positive `--task-id` argument supplied by Grinder.
 
 Output: Codex CLI's final plain-text response. For `tools/grinder.py`, it must be exactly one of:
 
@@ -132,7 +153,17 @@ Output: Codex CLI's final plain-text response. For `tools/grinder.py`, it must b
 {"task_status":"failed","fail_reason":"Reason for failure."}
 ```
 
-It reads `coding_agents.default` from `config/config.yaml`, requires provider `codex`, and uses the configured model and effort. It exits nonzero when Codex CLI crashes, fails, or has no final response.
+`codex.py` requires provider `codex` and uses the configured model and effort.
+`aider.py` requires provider `aider`, launches the installed Aider CLI in
+one-shot message mode, and passes it the configured model, OpenAI-compatible
+base URL, API key, and task-specific
+`.grindr/logs/task-<task_id>-aider-chat-history.md` path. It runs from the
+parent project directory and explicitly supplies that project's editable text
+files, including untracked files, while excluding `.grindr`, `.git`, virtual
+environments, dependency trees, and generated caches. It does not make direct
+LLM HTTP calls. Both exit nonzero when their CLI fails or produces no final
+response. Grinder must pass the claimed task ID to the adapter; do not invent
+a shared or root-level Aider history path.
 
 ### `tools/grinder.py`
 
@@ -150,7 +181,7 @@ or:
 {"task_id":1,"task_status":"fail","fail_reason":"Reason for failure."}
 ```
 
-It selects the earliest `new` task from the earliest phase in `new` or `in_progress` status, marks it `in_progress`, then continues until no `new` tasks remain. It logs events to `logs/YYYY-MM-DD.log`. A Codex CLI failure or invalid response exits nonzero and leaves the claimed task `in_progress` for inspection or retry.
+It selects the earliest `new` task from the earliest phase in `new` or `in_progress` status, marks it `in_progress`, then dispatches it to the `coding_agents.default.provider` adapter. It continues until no `new` tasks remain. It logs events to `logs/YYYY-MM-DD.log`. Aider receives up to two format reminders after an invalid response; a third invalid response is recorded as a failed task and stops the worker. An adapter process failure leaves the claimed task `in_progress` for inspection or retry.
 
 ### `tools/fix_task.py`
 
@@ -158,22 +189,48 @@ Input JSON: `{"task_id":1,"task_instructions":"Replacement instructions."}`. It 
 
 ## Start The Worker
 
-After all known phases and tasks are recorded, launch the worker detached from ChatGPT:
+After all known phases and tasks are recorded, start the worker. This is
+required; do not substitute an in-process background command or wait for the
+worker to finish.
+
+1. Read `.grindr/config/config.yaml` and identify
+   `coding_agents.default.provider`. It may be `codex` or `aider`; do not
+   assume a particular provider or model.
+2. Always launch through the provider-aware service launcher:
 
 ```bash
 ./tools/start-grinder.sh
 ```
 
+3. If the agent's current sandbox cannot access the user systemd manager or the
+   selected provider's required network, request explicit sandbox escalation
+   for `./tools/start-grinder.sh`. If the client supports remembered command
+   approvals, scope the approval to this exact launcher prefix. Never attempt
+   to escape or weaken the sandbox from Python, and never replace the launcher
+   with direct invocation of `grinder.py`, `aider.py`, or `codex.py`.
+4. If escalation is unavailable or declined, report the exact launcher error
+   and instruct the user to run `./tools/start-grinder.sh` once from their
+   normal shell. Do not claim that the worker has started.
+
 The launcher runs the worker as a user systemd service. This keeps it alive
 when the command-execution host cleans up background child processes after the
-launching shell exits. On AppArmor-enabled Linux hosts, it also propagates the
-launcher's profile to the service so Codex's Bubblewrap workspace sandbox can
-initialize normally.
+launching shell exits. On AppArmor-enabled Linux hosts, it propagates the
+launcher's profile only for the Codex provider so Codex's Bubblewrap workspace
+sandbox can initialize normally. The Aider provider uses the user service
+manager's normal profile so it can reach host-local model endpoints.
 
-Do not wait for it. Tell the user: "We're on it. Check back later." Query `tools/get_project_status.py` or `tools/get_project_summary.py '{"output":"simple"}'` when they return.
+After a successful launch, do not wait for task completion. Tell the user:
+"We're on it. Check back later." When the user returns, query
+`tools/get_project_status.py` or
+`tools/get_project_summary.py '{"output":"simple"}'` and report the recorded
+state.
 
-To stop a running grinder worker and its Codex child, run:
+To stop a running grinder worker and its coding-agent child, run:
 
 ```bash
 ./tools/kill-grinder.sh
 ```
+
+## Handling failures
+
+When prompted to check on the status of a project, if a task ended in failure, discuss with user how to address the failure. Once a plan is clear, use `tools/fix_task.py` to update the task with improved instructions. Launch `./tools/start-grinder.sh` again. 

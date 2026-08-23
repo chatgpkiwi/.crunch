@@ -1,10 +1,14 @@
 # Coding-agent configuration for task execution.
 #
-# Add additional named agents under `coding_agents` when support for multiple
-# providers is introduced. The current implementation supports only `default`
-# and requires its provider to be Codex.
+# Grinder dispatches its `default` agent to the provider named below. Supported
+# providers are `aider` and `codex`.
 coding_agents:
   default:
-    provider: codex
-    model: "5.6 Luna"
-    effort: low
+    provider: aider
+    model: "openai/lemonade-qwen"
+    openai-api-base: "http://127.0.0.1:4000"
+    openai-api-key: "sk-local"
+
+#    provider: codex
+#    model: "5.6 Luna"
+#    effort: low

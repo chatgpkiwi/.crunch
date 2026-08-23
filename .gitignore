@@ -9,3 +9,4 @@ __pycache__/
 # Keep the directory in the repository, but ignore generated log contents.
 /logs/*
 !/logs/.gitkeep
+.aider*
