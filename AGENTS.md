@@ -170,13 +170,14 @@ After all known phases and tasks are recorded, launch the worker detached from C
 
 The launcher runs the worker as a user systemd service. This keeps it alive
 when the command-execution host cleans up background child processes after the
-launching shell exits. On AppArmor-enabled Linux hosts, it also propagates the
-launcher's profile to the service so Codex's Bubblewrap workspace sandbox can
-initialize normally.
+launching shell exits. On AppArmor-enabled Linux hosts, it propagates the
+launcher's profile only for the Codex provider so Codex's Bubblewrap workspace
+sandbox can initialize normally. The Aider provider uses the user service
+manager's normal profile so it can reach host-local model endpoints.
 
 Do not wait for it. Tell the user: "We're on it. Check back later." Query `tools/get_project_status.py` or `tools/get_project_summary.py '{"output":"simple"}'` when they return.
 
-To stop a running grinder worker and its Codex child, run:
+To stop a running grinder worker and its coding-agent child, run:
 
 ```bash
 ./tools/kill-grinder.sh
