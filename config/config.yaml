@@ -1,25 +1,25 @@
 # Coding-agent configuration for task execution. Exactly one uncommented
 # `coding_agent` block is allowed. Supported providers are `aider`, `codex`,
 # and `qwen`.
-coding_agent:
-  provider: aider
-  model: "openai/lemonade-qwen"
-  openai-api-base: "http://127.0.0.1:4000"
-  openai-api-key: "sk-local"
+
+#coding_agent:
+#  provider: aider
+#  model: "openai/lemonade-qwen"
+#  openai-api-base: "http://127.0.0.1:4000"
+#  openai-api-key: "sk-local"
 
 #### CODEX EXAMPLE
-# coding_agent:
-#   provider: codex
-#   model: "5.6 Luna"
-#   effort: low
+coding_agent:
+  provider: codex
+  model: "5.6 Luna"
+  effort: low
 
 #### QWEN CODER EXAMPLE
-# coding_agent:
-#   provider: qwen
-#   model: "Qwen3-Coder-Next"
-#   effort: medium # Reserved for configuration consistency; Qwen Code has no effort flag.
-#   openai-api-base: "http://127.0.0.1:4000/v1"
-#   openai-api-key: "sk-local"
-#   output-format: stream-json # Optional: text, json, or stream-json (default).
-#   max-wall-time: "120m" # Optional Qwen Code limit.
-#   max-tool-calls: "500" # Optional Qwen Code limit.
+# Qwen reads authentication, provider, endpoint, and model selection from the
+# invoking user's Qwen settings (normally ~/.qwen/settings.json). .crunch only
+# controls unattended execution here.
+#coding_agent:
+#  provider: qwen
+#  output-format: stream-json # Optional: text, json, or stream-json (default).
+#  max-wall-time: "120m" # Optional Qwen Code limit.
+#  max-tool-calls: "500" # Optional Qwen Code limit.

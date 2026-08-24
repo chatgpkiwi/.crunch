@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Send one prompt to the installed Qwen Code CLI and print its task result.
 
-The adapter owns only the boundary between crunch and Qwen Code: configuration,
-non-interactive invocation, compact logs, and validation of the final task
-status.  Model access remains the Qwen CLI's responsibility.
+The adapter owns only the boundary between crunch and Qwen Code: non-interactive
+invocation, compact logs, and validation of the final task status. Authentication,
+provider, endpoint, and model selection remain the Qwen CLI's responsibility and
+come from the user's Qwen configuration.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ INVALID_RESPONSE_FAILURE_REASON = (
     "the initial response and two format reminders."
 )
 JSON_OBJECT_PATTERN = re.compile(r"\{[^{}]*\}")
+QWEN_API_ERROR_PATTERN = re.compile(r"^\[API Error:\s*(.*?)\]$", re.IGNORECASE | re.DOTALL)
 FORMAT_REMINDER = """This is an unattended development cycle. Your previous reply was invalid.
 
 Reply now with exactly one JSON object and no other text, Markdown, code fence, question, explanation, or request for files. You must not ask for more information. Inspect the workspace and complete the assigned task using the existing context.
@@ -46,12 +48,8 @@ Reply with exactly one of:
 
 @dataclass(frozen=True)
 class QwenSettings:
-    """The Qwen Code settings read from ``coding_agent``."""
+    """The Qwen invocation controls read from ``coding_agent``."""
 
-    model: str
-    openai_api_base: str
-    openai_api_key: str
-    effort: str | None
     max_wall_time: str | None
     max_tool_calls: str | None
     output_format: str
@@ -93,23 +91,15 @@ def read_agent_fields(config_path: Path) -> dict[str, str]:
 
 
 def read_settings(config_path: Path = DEFAULT_CONFIG) -> QwenSettings:
-    """Read and validate the Qwen Code settings needed for one run."""
+    """Read Qwen run controls without overriding the user's Qwen settings."""
     fields = read_agent_fields(config_path)
     if fields.get("provider") != "qwen":
         raise ValueError("config.yaml must define coding_agent.provider as qwen")
-    required = ("model", "openai-api-base", "openai-api-key")
-    missing = [field for field in required if not fields.get(field)]
-    if missing:
-        raise ValueError(f"config.yaml is missing Qwen setting(s): {', '.join(missing)}")
     output_format = fields.get("output-format", DEFAULT_OUTPUT_FORMAT).lower()
     if output_format not in VALID_OUTPUT_FORMATS:
         allowed = ", ".join(sorted(VALID_OUTPUT_FORMATS))
         raise ValueError(f"unsupported Qwen output format: {output_format}; expected one of: {allowed}")
     return QwenSettings(
-        model=fields["model"],
-        openai_api_base=fields["openai-api-base"],
-        openai_api_key=fields["openai-api-key"],
-        effort=fields.get("effort") or None,
         max_wall_time=fields.get("max-wall-time") or None,
         max_tool_calls=fields.get("max-tool-calls") or None,
         output_format=output_format,
@@ -126,18 +116,9 @@ def read_prompt(value: str | None) -> str:
 
 
 def build_command(settings: QwenSettings) -> list[str]:
-    """Build the headless Qwen Code command for a workspace-writing run."""
+    """Build a headless command while leaving model access to Qwen settings."""
     command = [
         QWEN_COMMAND,
-        "--bare",
-        "--auth-type",
-        "openai",
-        "--openai-base-url",
-        settings.openai_api_base,
-        "--openai-api-key",
-        settings.openai_api_key,
-        "--model",
-        settings.model,
         "--approval-mode",
         "yolo",
         "--output-format",
@@ -227,6 +208,13 @@ def extract_completion_response(output: str) -> str:
     raise RuntimeError("Qwen output did not contain a valid task-status JSON object")
 
 
+def raise_for_qwen_api_error(output: str) -> None:
+    """Treat Qwen's exit-zero API error result as an adapter failure."""
+    match = QWEN_API_ERROR_PATTERN.fullmatch(output.strip())
+    if match:
+        raise RuntimeError(f"Qwen Code reported an API error: {match.group(1).strip()}")
+
+
 def run_qwen(prompt: str, settings: QwenSettings) -> str:
     """Run Qwen Code and return a normalized task-status response."""
     if not shutil.which(QWEN_COMMAND):
@@ -240,8 +228,7 @@ def run_qwen(prompt: str, settings: QwenSettings) -> str:
         command = build_command(settings)
         log_event(
             "invocation_started",
-            model=settings.model,
-            effort=settings.effort,
+            model_source="qwen_user_settings",
             project_root=str(PROJECT_ROOT),
             attempt=attempt,
             format_retry=attempt > 1,
@@ -265,8 +252,10 @@ def run_qwen(prompt: str, settings: QwenSettings) -> str:
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "no error output"
             raise RuntimeError(f"Qwen Code exited with {result.returncode}: {detail[:1000]}")
+        final_text = response_text(result.stdout, settings.output_format)
+        raise_for_qwen_api_error(final_text)
         try:
-            return extract_completion_response(response_text(result.stdout, settings.output_format))
+            return extract_completion_response(final_text)
         except RuntimeError:
             log_event("invalid_completion_response", attempt=attempt)
 
