@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -19,15 +20,15 @@ from datetime import datetime
 from pathlib import Path
 
 
-GRINDR_ROOT = Path(__file__).resolve().parent.parent
-PROJECT_ROOT = GRINDR_ROOT.parent
-DEFAULT_CONFIG = GRINDR_ROOT / "config" / "config.yaml"
-LOG_DIRECTORY = GRINDR_ROOT / "logs"
+crunch_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = crunch_ROOT.parent
+DEFAULT_CONFIG = crunch_ROOT / "config" / "config.yaml"
+LOG_DIRECTORY = crunch_ROOT / "logs"
 AIDER_COMMAND = "aider"
 MAX_INVALID_RESPONSE_RETRIES = 2
 EXCLUDED_PROJECT_DIRECTORIES = {
     ".git",
-    ".grindr",
+    ".crunch",
     ".venv",
     "venv",
     "node_modules",
@@ -43,8 +44,9 @@ EXCLUDED_PROJECT_FILE_NAMES = {
     ".aiderignore",
 }
 INVALID_RESPONSE_FAILURE_REASON = (
-    "Aider did not produce the required task-status JSON after the initial response and two format reminders."
+    "Aider did not produce a recognizable task-status JSON object after the initial response and two format reminders."
 )
+JSON_OBJECT_PATTERN = re.compile(r"\{[^{}]*\}")
 FORMAT_REMINDER = """This is an unattended development cycle. Your previous reply was invalid.
 
 Reply now with exactly one JSON object and no other text, Markdown, code fence, question, explanation, or request for files. No other replies will be accepted. You must not ask for more information. Inspect the workspace and complete the assigned task using the existing context.
@@ -57,7 +59,7 @@ Reply with exactly one of:
 
 @dataclass(frozen=True)
 class AiderSettings:
-    """The Aider CLI settings read from ``coding_agents.default``."""
+    """The Aider CLI settings read from ``coding_agent``."""
 
     model: str
     openai_api_base: str
@@ -74,7 +76,7 @@ def log_event(event: str, **fields: object) -> None:
         log_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
-def read_default_agent_fields(config_path: Path) -> dict[str, str]:
+def read_agent_fields(config_path: Path) -> dict[str, str]:
     """Read scalar fields from the project's small coding-agent YAML section."""
     try:
         lines = config_path.read_text(encoding="utf-8").splitlines()
@@ -82,17 +84,17 @@ def read_default_agent_fields(config_path: Path) -> dict[str, str]:
         raise ValueError(f"cannot read configuration: {error}") from error
 
     fields: dict[str, str] = {}
-    in_default = False
+    in_agent = False
     for line in lines:
         content = line.split("#", 1)[0].rstrip()
         if not content:
             continue
-        if content == "  default:":
-            in_default = True
+        if content == "coding_agent:":
+            in_agent = True
             continue
-        if in_default and not line.startswith("    "):
-            in_default = False
-        if in_default and line.startswith("    ") and ":" in content:
+        if in_agent and not line.startswith((" ", "\t")):
+            in_agent = False
+        if in_agent and ":" in content:
             key, value = content.strip().split(":", 1)
             fields[key.strip()] = value.strip().strip("\"'")
     return fields
@@ -100,9 +102,9 @@ def read_default_agent_fields(config_path: Path) -> dict[str, str]:
 
 def read_settings(config_path: Path = DEFAULT_CONFIG) -> AiderSettings:
     """Read and validate the Aider settings needed for an Aider CLI run."""
-    fields = read_default_agent_fields(config_path)
+    fields = read_agent_fields(config_path)
     if fields.get("provider") != "aider":
-        raise ValueError("config.yaml must define coding_agents.default.provider as aider")
+        raise ValueError("config.yaml must define coding_agent.provider as aider")
     required = ("model", "openai-api-base", "openai-api-key")
     missing = [field for field in required if not fields.get(field)]
     if missing:
@@ -133,11 +135,11 @@ def is_text_file(path: Path) -> bool:
 
 
 def project_files() -> list[Path]:
-    """Find editable text files in the project that contains ``.grindr``.
+    """Find editable text files in the project that contains ``.crunch``.
 
     Aider's repository map only includes Git-tracked files.  A project may not
     yet have a Git repository, or may have untracked files, so explicitly add
-    the parent project's text files.  Keep Grinder's own state and generated
+    the parent project's text files.  Keep crunch's own state and generated
     caches out of the coding session.
     """
     files: list[Path] = []
@@ -161,7 +163,7 @@ def build_command(
     settings: AiderSettings, prompt_path: Path, task_id: int, editable_files: list[Path]
 ) -> list[str]:
     """Build a one-shot Aider command that edits the project without commits."""
-    history_path = Path(".grindr") / "logs" / f"task-{task_id}-aider-chat-history.md"
+    history_path = Path(".crunch") / "logs" / f"task-{task_id}-aider-chat-history.md"
     command = [
         AIDER_COMMAND,
         "--model",
@@ -187,47 +189,29 @@ def build_command(
     return command
 
 
-def extract_completion_response_from_history(history_path: Path) -> str:
-    """Read the latest Aider reply and require exactly one unfenced JSON object.
+def extract_completion_response(output: str) -> str:
+    """Return a valid task-status JSON object found anywhere in Aider output.
 
-    Aider's terminal transcript may wrap long JSON strings. Its chat history
-    preserves the model's raw reply, while marking command output with ``>``
-    and the prompt with ``####``. Inspecting that latest section lets Grinder
-    reject prose and Markdown fences without mistaking Aider's own status
-    output for the model's response.
+    Aider commonly wraps its final JSON status in prose or a Markdown code
+    fence. Scan each flat JSON object in reverse order so the final valid
+    status wins, then normalize it before returning it to ``crunch.py``.
     """
-    try:
-        latest_session = history_path.read_text(encoding="utf-8").rsplit("# aider chat started", 1)[-1]
-    except OSError as error:
-        raise RuntimeError(f"cannot read Aider chat history: {error}") from error
-    _, separator, latest_session = latest_session.partition("\n")
-    if not separator:
-        raise RuntimeError("Aider chat history does not contain a completed session")
-
-    reply_lines = [
-        line.strip()
-        for line in latest_session.splitlines()
-        if line.strip()
-        and not line.lstrip().startswith(("#", ">", "####"))
-    ]
-    if len(reply_lines) != 1:
-        raise RuntimeError("Aider completed without exactly one JSON task-status reply")
-
-    try:
-        response = json.loads(reply_lines[0])
-    except json.JSONDecodeError as error:
-        raise RuntimeError("Aider completed without exactly one JSON task-status reply") from error
-    if response == {"task_status": "complete"}:
-        return json.dumps(response, ensure_ascii=False)
-    if (
-        isinstance(response, dict)
-        and set(response) == {"task_status", "fail_reason"}
-        and response.get("task_status") == "failed"
-        and isinstance(response.get("fail_reason"), str)
-        and response["fail_reason"].strip()
-    ):
-        return json.dumps(response, ensure_ascii=False)
-    raise RuntimeError("Aider completed without exactly one JSON task-status reply")
+    for match in reversed(list(JSON_OBJECT_PATTERN.finditer(output))):
+        try:
+            response = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            continue
+        if response == {"task_status": "complete"}:
+            return json.dumps(response, ensure_ascii=False)
+        if (
+            isinstance(response, dict)
+            and set(response) == {"task_status", "fail_reason"}
+            and response.get("task_status") == "failed"
+            and isinstance(response.get("fail_reason"), str)
+            and response["fail_reason"].strip()
+        ):
+            return json.dumps(response, ensure_ascii=False)
+    raise RuntimeError("Aider output did not contain a valid task-status JSON object")
 
 
 def run_aider(prompt: str, settings: AiderSettings, task_id: int) -> str:
@@ -237,7 +221,7 @@ def run_aider(prompt: str, settings: AiderSettings, task_id: int) -> str:
     if not shutil.which(AIDER_COMMAND):
         log_event("aider_not_found")
         raise RuntimeError("Aider CLI was not found on PATH")
-    with tempfile.TemporaryDirectory(prefix="grindr-aider-") as temporary_directory:
+    with tempfile.TemporaryDirectory(prefix="crunch-aider-") as temporary_directory:
         prompt_path = Path(temporary_directory) / "prompt.md"
         history_path = LOG_DIRECTORY / f"task-{task_id}-aider-chat-history.md"
         editable_files = project_files()
@@ -273,7 +257,7 @@ def run_aider(prompt: str, settings: AiderSettings, task_id: int) -> str:
                 detail = result.stderr.strip() or result.stdout.strip() or "no error output"
                 raise RuntimeError(f"Aider exited with {result.returncode}: {detail[:1000]}")
             try:
-                return extract_completion_response_from_history(history_path)
+                return extract_completion_response(result.stdout)
             except RuntimeError:
                 log_event("invalid_completion_response", task_id=task_id, attempt=attempt + 1)
 
@@ -288,7 +272,7 @@ def main(arguments: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("prompt", nargs="?", help="prompt text; read stdin when omitted")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--task-id", type=int, required=True, help="Grindr task ID for the isolated Aider chat history file")
+    parser.add_argument("--task-id", type=int, required=True, help="crunch task ID for the isolated Aider chat history file")
     args = parser.parse_args(arguments)
     try:
         prompt = read_prompt(args.prompt)

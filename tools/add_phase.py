@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_DATABASE = Path(__file__).resolve().parent.parent / "database" / "grindr.db"
+DEFAULT_DATABASE = Path(__file__).resolve().parent.parent / "database" / "crunch.db"
 STATUSES = {"new", "in_progress", "complete", "fail"}
 REQUIRED_TEXT_FIELDS = (
     "phase_name",

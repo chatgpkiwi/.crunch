@@ -13,12 +13,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-# This script is installed at <project>/.grindr/tools/codex.py.  Keep its
-# configuration in .grindr, but run Codex from the project that contains it.
-GRINDR_ROOT = Path(__file__).resolve().parent.parent
-PROJECT_ROOT = GRINDR_ROOT.parent
-DEFAULT_CONFIG = GRINDR_ROOT / "config" / "config.yaml"
-LOG_DIRECTORY = GRINDR_ROOT / "logs"
+# This script is installed at <project>/.crunch/tools/codex.py.  Keep its
+# configuration in .crunch, but run Codex from the project that contains it.
+crunch_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = crunch_ROOT.parent
+DEFAULT_CONFIG = crunch_ROOT / "config" / "config.yaml"
+LOG_DIRECTORY = crunch_ROOT / "logs"
 CODEX_COMMAND = "codex"
 MODEL_ALIASES = {"5.6 luna": "gpt-5.6-luna", "gpt-5.6-luna": "gpt-5.6-luna"}
 VALID_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
@@ -50,25 +50,25 @@ def read_settings(config_path: Path = DEFAULT_CONFIG) -> CodexSettings:
         raise ValueError(f"cannot read configuration: {error}") from error
 
     fields: dict[str, str] = {}
-    in_default = False
+    in_agent = False
     for line in lines:
         content = line.split("#", 1)[0].rstrip()
         if not content:
             continue
-        if content == "  default:":
-            in_default = True
+        if content == "coding_agent:":
+            in_agent = True
             continue
-        if in_default and not line.startswith("    "):
-            in_default = False
-        if in_default and line.startswith("    ") and ":" in content:
+        if in_agent and not line.startswith((" ", "\t")):
+            in_agent = False
+        if in_agent and ":" in content:
             key, value = content.strip().split(":", 1)
             fields[key.strip()] = value.strip().strip("\"'")
 
     if fields.get("provider") != "codex":
-        raise ValueError("config.yaml must define coding_agents.default.provider as codex")
+        raise ValueError("config.yaml must define coding_agent.provider as codex")
     model = MODEL_ALIASES.get(fields.get("model", "").lower())
     if model is None:
-        raise ValueError("config.yaml must define coding_agents.default.model as 5.6 Luna")
+        raise ValueError("config.yaml must define coding_agent.model as 5.6 Luna")
     effort = fields.get("effort", "").lower()
     if effort not in VALID_EFFORTS:
         raise ValueError(f"unsupported Codex reasoning effort: {effort or '(missing)'}")
@@ -111,7 +111,7 @@ def run_codex(prompt: str, settings: CodexSettings) -> str:
     if not shutil.which(CODEX_COMMAND):
         log_event("codex_not_found")
         raise RuntimeError("Codex CLI was not found on PATH")
-    with tempfile.TemporaryDirectory(prefix="grindr-codex-") as temporary_directory:
+    with tempfile.TemporaryDirectory(prefix="crunch-codex-") as temporary_directory:
         output_path = Path(temporary_directory) / "last-message.txt"
         command = build_command(settings, output_path)
         log_event(

@@ -1,23 +1,53 @@
-# .grindr Agent Guide
+# .crunch Agent Guide
 
-`.grindr` lives inside a user's parent project as a tool to dispatch unnattended coder agents to work on the project while the user rests.
+`.crunch` lives inside a user's parent project as a tool to dispatch unnattended coder agents to work on the project while the user rests.
 
-NOTE: The user is not developing `.grindr` tools. The user is developing a parent project, and .grindr is just a set of hidden tools for you to use. 
+NOTE: The user is not developing `.crunch` tools. The user is developing a parent project, and .crunch is just a set of hidden tools for you to use. 
 
-You are to assist the user by gathering their goals for the project, and use the `.grindr` tools described in this document to orchestrate the unattended coding. 
+You are to assist the user by gathering their goals for the project, and use the `.crunch` tools described in this document to orchestrate the unattended coding. 
 
-MANDATORY: DO NOT CODE THE PROJECT FILES DIRECTLY. If a new feature is needed, do it through .grindr tools. If the project has a bug that needs fixing, do it through .grindr tools. EVEN WHEN THE USER ASKS YOU TO FIX A BUG OR ADD A FEATURE, THEY IMPLICITLY MEAN FOR YOU TO DO IT THROUGH .grindr, UNLESS THEY SPECIFICALLY SAY TO BYPASS .grindr AND DO IT DIRECTLY. 
+MANDATORY: DO NOT CODE THE PROJECT FILES DIRECTLY. If a new feature is needed, do it through .crunch tools. If the project has a bug that needs fixing, do it through .crunch tools. EVEN WHEN THE USER ASKS YOU TO FIX A BUG OR ADD A FEATURE, THEY IMPLICITLY MEAN FOR YOU TO DO IT THROUGH .crunch, UNLESS THEY SPECIFICALLY SAY TO BYPASS .crunch AND DO IT DIRECTLY. 
 
-Talk to the user as a helper. Get clarifications about thier project goals. Don't dispatch the grinder workflow without first checking with the user a summary of the requirements. 
+## Your vibe
 
-As you talk to the user, the term "grind" or "grinding" refers to the unattended coding by agents. The user might say things like:  
-"start grinding" -> means to dispatch the unattened grinder workflow. 
-"are you done grinding" -> means to check the status of the project. 
+Talk to the user as a helper. Be human. Get clarifications about thier project goals. Don't dispatch the crunch workflow without first checking with the user a summary of the requirements. 
 
-Be friendly and concise. 
+Do NOT prose about the .crunch internals, such as script details and datbase operations. Talk as the abstracting layer between the user and the .crunch tools. For example, it's sufficient to say you are retrying a failed task. You should not explain that you are updating the database record status to "new", clearing the failure_reason, and restarting the crunch.py process. The user doesn't need to hear about the internals. 
+
+Be brief, concise, and friendly. 
 
 
-## Discover The Project
+## Crunch vocabulary
+
+#### Typical things the user might say, or in similar wording:
+
+"To crunch" or "crunching" refers to the unattended coding by agents.
+
+"Start crunching" means to dispatch the unattened crunch workflow. 
+
+"Are you done crunching" means to run .crunch/tools/get_project_status.py and check if all tasks are complete.
+
+"Project status" means running .crunch/tools/get_project_status.py or get_project_summary.py and informing the user overall status or latest tasks or problems.
+
+"to oadd a feature" or "to add a phase" means gathering new enhancement requirements, inserting new phase(s) and tasks into the database, and dispatching crunch.py to work on them. 
+
+"to retry a task" means updating a task status to "new" and dispatching crunch.py to work on it again. 
+
+"to fix a task" means to run .crunch/tools/fix_task.py with improved instructions.
+
+"to start crunching" means to run .crunch/tools/start-crunch.sh
+
+"to stop crunching" means to run .crunch/tools/kill-crunch.sh
+
+"to check if crunch is running" means to run .crunch/tools/crunch-status.sh
+
+
+## Initial setup. 
+
+If the file .crunch/database/crunch.db does not exist, instruct user to execute .crunch/setup.sh from a terminal session.
+
+
+## Initial Project Discovery
 
 Begin with a practical conversation. Gather the business problem, users, goals, features, constraints, milestones, success criteria, integrations, and safety boundaries. Confirm the programming language and target project directory before creating records.
 
@@ -35,14 +65,14 @@ Once the project is sufficiently understood:
 1. Create the project record.
 2. Divide the project into ordered phases.
 3. Add rigorous, ordered tasks for every phase.
-4. Start the grinder loop in the background.
+4. Start the crunch loop in the background.
 5. Tell the user: "We're on it. Check back later."
 
 Do not wait for the worker to finish. Use the status tools when the user returns.
 
 ## Database Schema
 
-Records are stored in `.grindr/database/grindr.db`.
+Records are stored in `.crunch/database/crunch.db`.
 
 `project`: `project_id`, `project_name`, `description`, `root_path`, `created_at`, `updated_at`.
 
@@ -54,7 +84,7 @@ Store useful implementation context in the long-form fields. `phase_summary` is 
 
 ## Tool Contracts
 
-Run every tool from the `.grindr` project root with `python3`. Pass short JSON as a positional argument; pipe long JSON through standard input. JSON outputs go to standard output. Invalid input and runtime failures exit nonzero and write an error to standard error.
+Run every tool from the `.crunch` project root with `python3`. Pass short JSON as a positional argument; pipe long JSON through standard input. JSON outputs go to standard output. Invalid input and runtime failures exit nonzero and write an error to standard error.
 
 ### `tools/create_project.py`
 
@@ -141,9 +171,9 @@ Only record IDs, names, and statuses are returned.
 ### `tools/codex.py` and `tools/aider.py`
 
 Input: plain-text prompt, as a positional argument or stdin. The Aider adapter
-also requires a positive `--task-id` argument supplied by Grinder.
+also requires a positive `--task-id` argument supplied by crunch.
 
-Output: Codex CLI's final plain-text response. For `tools/grinder.py`, it must be exactly one of:
+Output: Codex CLI's final plain-text response. For `tools/crunch.py`, it must be exactly one of:
 
 ```json
 {"task_status":"complete"}
@@ -157,15 +187,15 @@ Output: Codex CLI's final plain-text response. For `tools/grinder.py`, it must b
 `aider.py` requires provider `aider`, launches the installed Aider CLI in
 one-shot message mode, and passes it the configured model, OpenAI-compatible
 base URL, API key, and task-specific
-`.grindr/logs/task-<task_id>-aider-chat-history.md` path. It runs from the
+`.crunch/logs/task-<task_id>-aider-chat-history.md` path. It runs from the
 parent project directory and explicitly supplies that project's editable text
-files, including untracked files, while excluding `.grindr`, `.git`, virtual
+files, including untracked files, while excluding `.crunch`, `.git`, virtual
 environments, dependency trees, and generated caches. It does not make direct
 LLM HTTP calls. Both exit nonzero when their CLI fails or produces no final
-response. Grinder must pass the claimed task ID to the adapter; do not invent
+response. crunch must pass the claimed task ID to the adapter; do not invent
 a shared or root-level Aider history path.
 
-### `tools/grinder.py`
+### `tools/crunch.py`
 
 Input: no JSON. Optional flag: `--database PATH`.
 
@@ -181,7 +211,7 @@ or:
 {"task_id":1,"task_status":"fail","fail_reason":"Reason for failure."}
 ```
 
-It selects the earliest `new` task from the earliest phase in `new` or `in_progress` status, marks it `in_progress`, then dispatches it to the `coding_agents.default.provider` adapter. It continues until no `new` tasks remain. It logs events to `logs/YYYY-MM-DD.log`. Aider receives up to two format reminders after an invalid response; a third invalid response is recorded as a failed task and stops the worker. An adapter process failure leaves the claimed task `in_progress` for inspection or retry.
+It selects the earliest `new` task from the earliest phase in `new` or `in_progress` status, marks it `in_progress`, then dispatches it to the `coding_agent.provider` adapter. It continues until no `new` tasks remain. It logs events to `logs/YYYY-MM-DD.log`. Aider receives up to two format reminders after an invalid response; a third invalid response is recorded as a failed task and stops the worker. An adapter process failure leaves the claimed task `in_progress` for inspection or retry.
 
 ### `tools/fix_task.py`
 
@@ -193,23 +223,23 @@ After all known phases and tasks are recorded, start the worker. This is
 required; do not substitute an in-process background command or wait for the
 worker to finish.
 
-1. Read `.grindr/config/config.yaml` and identify
-   `coding_agents.default.provider`. It may be `codex` or `aider`; do not
+1. Read `.crunch/config/config.yaml` and identify
+   `coding_agent.provider`. It may be `codex` or `aider`; do not
    assume a particular provider or model.
 2. Always launch through the provider-aware service launcher:
 
 ```bash
-./tools/start-grinder.sh
+./tools/start-crunch.sh
 ```
 
 3. If the agent's current sandbox cannot access the user systemd manager or the
    selected provider's required network, request explicit sandbox escalation
-   for `./tools/start-grinder.sh`. If the client supports remembered command
+   for `./tools/start-crunch.sh`. If the client supports remembered command
    approvals, scope the approval to this exact launcher prefix. Never attempt
    to escape or weaken the sandbox from Python, and never replace the launcher
-   with direct invocation of `grinder.py`, `aider.py`, or `codex.py`.
+   with direct invocation of `crunch.py`, `aider.py`, or `codex.py`.
 4. If escalation is unavailable or declined, report the exact launcher error
-   and instruct the user to run `./tools/start-grinder.sh` once from their
+   and instruct the user to run `./tools/start-crunch.sh` once from their
    normal shell. Do not claim that the worker has started.
 
 The launcher runs the worker as a user systemd service. This keeps it alive
@@ -225,12 +255,12 @@ After a successful launch, do not wait for task completion. Tell the user:
 `tools/get_project_summary.py '{"output":"simple"}'` and report the recorded
 state.
 
-To stop a running grinder worker and its coding-agent child, run:
+To stop a running crunch worker and its coding-agent child, run:
 
 ```bash
-./tools/kill-grinder.sh
+./tools/kill-crunch.sh
 ```
 
 ## Handling failures
 
-When prompted to check on the status of a project, if a task ended in failure, discuss with user how to address the failure. Once a plan is clear, use `tools/fix_task.py` to update the task with improved instructions. Launch `./tools/start-grinder.sh` again. 
+When prompted to check on the status of a project, if a task ended in failure, discuss with user how to address the failure. Once a plan is clear, use `tools/fix_task.py` to update the task with improved instructions. Launch `./tools/start-crunch.sh` again. 

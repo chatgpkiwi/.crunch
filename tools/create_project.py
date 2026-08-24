@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_DATABASE = Path(__file__).resolve().parent.parent / "database" / "grindr.db"
+DEFAULT_DATABASE = Path(__file__).resolve().parent.parent / "database" / "crunch.db"
 
 
 def _read_payload(value: str | None) -> dict[str, Any]:

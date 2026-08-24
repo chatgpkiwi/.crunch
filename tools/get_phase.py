@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 
-DEFAULT_DATABASE = Path(__file__).resolve().parent.parent / "database" / "grindr.db"
+DEFAULT_DATABASE = Path(__file__).resolve().parent.parent / "database" / "crunch.db"
 
 
 def _read_phase_id(value: str | None) -> int:
