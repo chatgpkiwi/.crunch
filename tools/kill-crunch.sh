@@ -27,14 +27,15 @@ find_project_processes() {
 }
 
 codex_pids=$(find_project_processes 'codex\.py' || true)
+qwen_pids=$(find_project_processes 'qwen(\.py| )' || true)
 crunch_pids=$(find_project_processes 'crunch\.py' || true)
 
-if [ -z "$codex_pids$crunch_pids" ]; then
-    echo "No crunch or Codex processes found for $PROJECT_ROOT."
+if [ -z "$codex_pids$qwen_pids$crunch_pids" ]; then
+    echo "No crunch, Codex, or Qwen processes found for $PROJECT_ROOT."
     exit 0
 fi
 
-for pid in $codex_pids $crunch_pids; do
+for pid in $codex_pids $qwen_pids $crunch_pids; do
     if kill "$pid" 2>/dev/null; then
         echo "Sent TERM to process $pid."
     fi

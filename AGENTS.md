@@ -168,7 +168,7 @@ Output JSON:
 
 Only record IDs, names, and statuses are returned.
 
-### `tools/codex.py` and `tools/aider.py`
+### `tools/codex.py`, `tools/aider.py`, and `tools/qwen.py`
 
 Input: plain-text prompt, as a positional argument or stdin. The Aider adapter
 also requires a positive `--task-id` argument supplied by crunch.
@@ -191,9 +191,13 @@ base URL, API key, and task-specific
 parent project directory and explicitly supplies that project's editable text
 files, including untracked files, while excluding `.crunch`, `.git`, virtual
 environments, dependency trees, and generated caches. It does not make direct
-LLM HTTP calls. Both exit nonzero when their CLI fails or produces no final
-response. crunch must pass the claimed task ID to the adapter; do not invent
-a shared or root-level Aider history path.
+LLM HTTP calls. `qwen.py` requires provider `qwen`, launches the installed
+Qwen Code CLI from the parent project directory, and passes it the configured
+model, OpenAI-compatible base URL, API key, optional limits, and unattended
+approval mode. The Qwen CLI owns model access. All adapters exit nonzero when
+their CLI fails or produces no final response. crunch must pass the claimed
+task ID to the Aider adapter; do not invent a shared or root-level Aider
+history path.
 
 ### `tools/crunch.py`
 
@@ -224,7 +228,7 @@ required; do not substitute an in-process background command or wait for the
 worker to finish.
 
 1. Read `.crunch/config/config.yaml` and identify
-   `coding_agent.provider`. It may be `codex` or `aider`; do not
+   `coding_agent.provider`. It may be `codex`, `aider`, or `qwen`; do not
    assume a particular provider or model.
 2. Always launch through the provider-aware service launcher:
 

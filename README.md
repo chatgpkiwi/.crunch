@@ -4,7 +4,7 @@
 
 Forget running Codex one prompt at a time. Explain what you want. Let .crunch grind code while you go AFK. Check the project status later.
 
-Currently, .crunch can grind code using Codex itself, or delegate the grinding to Aider, and save your ChatGPT quota if you have a local LLM available. 
+Currently, .crunch can grind code using Codex itself, or delegate the grinding to Aider or Qwen Code and save your ChatGPT quota if you have a local LLM available.
 
 
 Agents, see [AGENTS.md](AGENTS.md).
@@ -18,6 +18,7 @@ The host project must have these commands available on `PATH`:
 - Codex
 - Git
 - Aider (optional - Local LLM use)
+- Qwen Code (optional - Qwen provider)
 
 ## Setup
 

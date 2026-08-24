@@ -20,6 +20,7 @@ CONFIG_PATH = ROOT / "config" / "config.yaml"
 AGENT_PROGRAMS = {
     "codex": Path(__file__).resolve().parent / "codex.py",
     "aider": Path(__file__).resolve().parent / "aider.py",
+    "qwen": Path(__file__).resolve().parent / "qwen.py",
 }
 UPDATE_TASK_PROGRAM = Path(__file__).resolve().parent / "update_task.py"
 LOG_DIRECTORY = ROOT / "logs"
