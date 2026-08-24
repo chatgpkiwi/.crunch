@@ -1,0 +1,750 @@
+#!/usr/bin/env python3
+"""Run one AFK coding prompt through Qwen Code CLI.
+
+This prototype wrapper keeps AFK's daemon boundary simple: AFK gives it a
+project path and a prompt, it runs Qwen Code headlessly in that workspace, and
+prints only the final result to stdout. Transient Qwen fatal cancellations are
+retried with bounded exponential backoff.
+"""
+
+from __future__ import annotations
+
+import argparse
+from configparser import ConfigParser
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import time
+from typing import Any
+
+
+# QWEN_COMMAND is resolved from PATH so the user's installed CLI is used.
+QWEN_COMMAND = "qwen"
+# INCREMENT_PROJECT_TOKENS_PATH updates AFK token accounting after Qwen calls.
+INCREMENT_PROJECT_TOKENS_PATH = Path(__file__).resolve().parent / "increment_project_tokens.py"
+# PROJECT_ROOT is the source or staged AFK root that contains config/config.ini.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# DEFAULT_AFK_HOME is the installed runtime tree used by AFK.
+DEFAULT_AFK_HOME = Path.home() / "afk"
+# AFK_HOME may be overridden for alternate staged runtime homes.
+AFK_HOME = Path(os.environ.get("AFK_HOME", DEFAULT_AFK_HOME)).expanduser()
+# LOCAL_MODEL_BASE_URL is Lemonade's OpenAI-compatible local endpoint.
+LOCAL_MODEL_BASE_URL = "http://127.0.0.1:13305/v1"
+# LOCAL_MODEL_NAME is the local model currently tested for AFK coding work.
+LOCAL_MODEL_NAME = "user.Qwen3-Coder-Next-Q6_K_L"
+# WORKER_MODEL_SECTION is the config.ini role used for Qwen coding settings.
+WORKER_MODEL_SECTION = "worker_model"
+# DEFAULT_QWEN_MAX_WALL_TIME bounds unattended daemon work when config is absent.
+DEFAULT_QWEN_MAX_WALL_TIME = "120m"
+# DEFAULT_QWEN_MAX_TOOL_CALLS bounds runaway agent loops during this prototype phase.
+DEFAULT_QWEN_MAX_TOOL_CALLS = "500"
+# DEFAULT_QWEN_OUTPUT_FORMAT avoids buffered transcripts that can be truncated.
+DEFAULT_QWEN_OUTPUT_FORMAT = "stream-json"
+# QWEN_OUTPUT_FORMATS are the headless output modes supported by Qwen Code CLI.
+QWEN_OUTPUT_FORMATS = {"text", "json", "stream-json"}
+# STREAM_EVENT_TYPE_PATTERN reads only the leading stream-json event type.
+STREAM_EVENT_TYPE_PATTERN = re.compile(r'^\s*\{\s*"type"\s*:\s*"([^"\\]*)"')
+# STREAM_FINAL_EVENT_TYPES can affect AFK's final response or token accounting.
+STREAM_FINAL_EVENT_TYPES = {"assistant", "result"}
+# RESPONSE_ARCHIVE_SEPARATOR separates the prompt from Qwen's response in task archives.
+RESPONSE_ARCHIVE_SEPARATOR = "##################### RESPONSE #######################"
+# FATAL_CANCELLATION_RETRY_DELAYS are retry sleeps for transient Qwen cancellations.
+FATAL_CANCELLATION_RETRY_DELAYS = (1, 2, 4, 8, 16, 32, 64, 128)
+# TOTAL_TOKEN_KEYS are common usage keys that already contain an entire request total.
+TOTAL_TOKEN_KEYS = ("total_tokens", "totalTokenCount", "total", "tokens", "token_count")
+# INPUT_TOKEN_KEYS are common usage keys for prompt/input-side tokens.
+INPUT_TOKEN_KEYS = ("prompt_tokens", "input_tokens", "promptTokenCount", "inputTokenCount", "input")
+# OUTPUT_TOKEN_KEYS are common usage keys for completion/output-side tokens.
+OUTPUT_TOKEN_KEYS = (
+    "completion_tokens",
+    "output_tokens",
+    "completionTokenCount",
+    "outputTokenCount",
+    "output",
+)
+# MAX_FAILURE_DETAIL_CHARS keeps nonzero-exit diagnostics useful in parent logs.
+MAX_FAILURE_DETAIL_CHARS = 1200
+
+
+def find_config_path() -> Path:
+    """Return the config file used for a direct qwen.py invocation."""
+    configured_path = os.environ.get("AFK_CONFIG")
+    if configured_path:
+        return Path(configured_path).expanduser()
+
+    source_config_path = PROJECT_ROOT / "config" / "config.ini"
+    if source_config_path.exists() and PROJECT_ROOT.resolve() != AFK_HOME.resolve():
+        return source_config_path
+
+    installed_config_path = AFK_HOME / "config" / "config.ini"
+    if installed_config_path.exists():
+        return installed_config_path
+
+    return source_config_path
+
+
+def worker_model_config_value(option_name: str, fallback: str = "") -> str:
+    """Return one worker-model option, falling back to source defaults."""
+    config_path = find_config_path()
+    config_parser = ConfigParser()
+    if config_parser.read(config_path) and config_parser.has_section(WORKER_MODEL_SECTION):
+        value = config_parser.get(WORKER_MODEL_SECTION, option_name, fallback="").strip()
+        if value:
+            return value
+
+    source_config_path = PROJECT_ROOT / "config" / "config.ini"
+    if config_path == source_config_path:
+        return fallback
+
+    source_config_parser = ConfigParser()
+    if (
+        not source_config_parser.read(source_config_path)
+        or not source_config_parser.has_section(WORKER_MODEL_SECTION)
+    ):
+        return fallback
+    return source_config_parser.get(WORKER_MODEL_SECTION, option_name, fallback=fallback).strip()
+
+
+def default_effort_from_config() -> str | None:
+    """Return the worker-model effort from config.ini when it is available."""
+    return worker_model_config_value("effort") or None
+
+
+def build_qwen_command(
+    effort: str | None = None,
+    max_wall_time: str = DEFAULT_QWEN_MAX_WALL_TIME,
+    max_tool_calls: str = DEFAULT_QWEN_MAX_TOOL_CALLS,
+    output_format: str = DEFAULT_QWEN_OUTPUT_FORMAT,
+) -> list[str]:
+    """Build the headless Qwen Code command for one coding prompt.
+
+    The prompt text is passed via stdin, not as a command-line argument,
+    to avoid shell escaping issues with quotes and argument length limits.
+    """
+    # Qwen Code 0.17.0 does not expose a CLI reasoning-effort flag. The
+    # argument is accepted by qwen.py so AFK can keep one config shape.
+    _ = effort
+    return [
+        QWEN_COMMAND,
+        "--bare",
+        "--auth-type",
+        "openai",
+        "--openai-base-url",
+        LOCAL_MODEL_BASE_URL,
+        "--openai-api-key",
+        "dummy",
+        "--model",
+        LOCAL_MODEL_NAME,
+        "--approval-mode",
+        "yolo",
+        "--output-format",
+        output_format,
+        "--max-wall-time",
+        max_wall_time,
+        "--max-tool-calls",
+        max_tool_calls,
+    ]
+
+
+def text_from_content(value: Any) -> str:
+    """Return text from the common Qwen message content shapes."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "".join(text_from_content(item) for item in value).strip()
+    if isinstance(value, dict):
+        for key in (
+            "text",
+            "content",
+            "result",
+            "response",
+            "output",
+            "message",
+            "messages",
+            "choices",
+        ):
+            text = text_from_content(value.get(key))
+            if text:
+                return text
+    return ""
+
+
+def final_result_text_from_value(value: Any) -> str:
+    """Return printable final-result text from a Qwen result payload."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+    return text_from_content(value).strip()
+
+
+def final_text_from_event(event: Any) -> str:
+    """Extract final or assistant text from one Qwen stream-json event."""
+    if not isinstance(event, dict):
+        return ""
+
+    if event.get("type") == "result":
+        return final_result_text_from_value(event.get("result"))
+
+    if event.get("type") == "assistant":
+        message = event.get("message")
+        if isinstance(message, dict):
+            role = str(message.get("role") or "").strip()
+            if role and role != "assistant":
+                return ""
+            return text_from_content(message.get("content"))
+        role = str(event.get("role") or "").strip()
+        if not role or role == "assistant":
+            return text_from_content(event.get("content"))
+
+    return ""
+
+
+def token_int(value: Any) -> int:
+    """Return a non-negative token integer from a JSON value."""
+    if isinstance(value, int):
+        return max(value, 0)
+    if isinstance(value, str) and value.strip().replace(",", "").isdigit():
+        return int(value.strip().replace(",", ""))
+    return 0
+
+
+def first_token_value(payload: dict[str, Any], keys: tuple[str, ...]) -> int:
+    """Return the first positive token value found for one key group."""
+    for key in keys:
+        token_value = token_int(payload.get(key))
+        if token_value:
+            return token_value
+    return 0
+
+
+def token_count_from_usage(usage: Any) -> int:
+    """Return a token total from a Qwen or Lemonade usage object."""
+    if not isinstance(usage, dict):
+        return 0
+
+    total_tokens = first_token_value(usage, TOTAL_TOKEN_KEYS)
+    if total_tokens:
+        return total_tokens
+
+    return max(
+        first_token_value(usage, INPUT_TOKEN_KEYS)
+        + first_token_value(usage, OUTPUT_TOKEN_KEYS),
+        0,
+    )
+
+
+def token_count_from_event(event: Any) -> int:
+    """Return token usage from one Qwen stream-json event when present."""
+    if not isinstance(event, dict):
+        return 0
+
+    usage_tokens = token_count_from_usage(event.get("usage"))
+    if usage_tokens:
+        return usage_tokens
+
+    message = event.get("message")
+    if isinstance(message, dict):
+        return token_count_from_usage(message.get("usage"))
+
+    stats = event.get("stats")
+    if isinstance(stats, dict):
+        models = stats.get("models")
+        if isinstance(models, dict):
+            model_token_total = 0
+            for model_stats in models.values():
+                if not isinstance(model_stats, dict):
+                    continue
+                token_stats = model_stats.get("tokens")
+                if isinstance(token_stats, dict):
+                    model_token_total += token_count_from_usage(token_stats)
+            return model_token_total
+
+    return 0
+
+
+def stream_event_type(output_line: str) -> str:
+    """Return a stream-json event type without parsing the full event body."""
+    event_match = STREAM_EVENT_TYPE_PATTERN.match(output_line)
+    if not event_match:
+        return ""
+    return event_match.group(1)
+
+
+class TokenUsageAccumulator:
+    """Collect Qwen token usage without double-counting run summaries."""
+
+    def __init__(self) -> None:
+        """Start an empty token counter for one Qwen invocation."""
+        self._assistant_call_tokens = 0
+        self._result_summary_tokens = 0
+
+    def add_event(self, event: Any) -> None:
+        """Add token usage from one parsed assistant or result event."""
+        if not isinstance(event, dict):
+            return
+
+        event_tokens = token_count_from_event(event)
+        if event_tokens <= 0:
+            return
+
+        if event.get("type") == "result":
+            # Result events are cumulative when Qwen reports usage there.
+            self._result_summary_tokens = event_tokens
+        elif event.get("type") == "assistant":
+            self._assistant_call_tokens += event_tokens
+
+    def total_tokens(self) -> int:
+        """Return the best available token total for one Qwen invocation."""
+        return self._result_summary_tokens or self._assistant_call_tokens
+
+
+def increment_project_tokens(
+    project_id: int,
+    tokens: int,
+    task_id: int | None = None,
+) -> None:
+    """Add Qwen token usage to project and optional task token columns."""
+    if tokens <= 0:
+        return
+    if not INCREMENT_PROJECT_TOKENS_PATH.exists():
+        print(
+            f"Token update skipped; missing {INCREMENT_PROJECT_TOKENS_PATH}",
+            file=sys.stderr,
+        )
+        return
+
+    command = [
+        sys.executable,
+        str(INCREMENT_PROJECT_TOKENS_PATH),
+        "--project-id",
+        str(project_id),
+        "--model",
+        "worker",
+        "--tokens",
+        str(tokens),
+    ]
+    if task_id is not None:
+        command.extend(["--task-id", str(task_id)])
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        error_text = result.stderr.strip() or result.stdout.strip()
+        if error_text:
+            print(error_text, file=sys.stderr)
+
+
+def read_prompt(args: argparse.Namespace) -> str:
+    """Return prompt text from --prompt-file or positional arguments."""
+    if args.prompt_file:
+        return Path(args.prompt_file).read_text(encoding="utf-8")
+    return " ".join(args.prompt).strip()
+
+
+def append_response_to_archive(archive_path: Path | None, response_text: str) -> None:
+    """Append Qwen's response text to a task prompt archive when requested."""
+    if archive_path is None:
+        return
+
+    archive_response = response_text.rstrip() or "(empty response)"
+    try:
+        with archive_path.open("a", encoding="utf-8") as archive_file:
+            archive_file.write(
+                f"\n\n{RESPONSE_ARCHIVE_SEPARATOR}\n\n{archive_response}\n"
+            )
+    except OSError as e:
+        print(
+            f"Could not append Qwen response archive {archive_path}: {e}",
+            file=sys.stderr,
+        )
+
+
+def archive_has_response(archive_path: Path | None) -> bool:
+    """Return whether an archive already contains a response section."""
+    if archive_path is None:
+        return False
+    try:
+        return RESPONSE_ARCHIVE_SEPARATOR in archive_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
+def output_format_from_config() -> str:
+    """Return the configured Qwen output format for coding runs."""
+    output_format = worker_model_config_value(
+        "output_format",
+        DEFAULT_QWEN_OUTPUT_FORMAT,
+    ).lower()
+    if output_format not in QWEN_OUTPUT_FORMATS:
+        allowed_values = ", ".join(sorted(QWEN_OUTPUT_FORMATS))
+        raise ValueError(f"worker_model.output_format must be one of: {allowed_values}")
+    if output_format == "json":
+        print(
+            "worker_model.output_format=json is buffered and can create huge "
+            "transcripts; using stream-json instead.",
+            file=sys.stderr,
+        )
+        return "stream-json"
+    return output_format
+
+
+def has_fatal_cancellation_error(output_text: str) -> bool:
+    """Return whether Qwen output reports a FatalCancellationError."""
+    return "FatalCancellationError" in output_text
+
+
+def truncate_failure_detail(text: str) -> str:
+    """Return a compact diagnostic excerpt for failed Qwen invocations."""
+    stripped_text = re.sub(r"\s+", " ", text).strip()
+    if len(stripped_text) <= MAX_FAILURE_DETAIL_CHARS:
+        return stripped_text
+    return stripped_text[:MAX_FAILURE_DETAIL_CHARS].rstrip() + "..."
+
+
+def final_text_from_json_output(output_text: str) -> tuple[str, int]:
+    """Return final text and tokens from non-stream Qwen JSON output."""
+    response_body = json.loads(output_text)
+    if isinstance(response_body, list):
+        final_text = ""
+        latest_tokens = 0
+        for event in response_body:
+            event_text = final_text_from_event(event)
+            if event_text:
+                final_text = event_text
+            event_tokens = token_count_from_event(event)
+            if event_tokens:
+                latest_tokens = event_tokens
+        return final_text.strip(), latest_tokens
+
+    return (
+        final_text_from_event(response_body).strip(),
+        token_count_from_event(response_body),
+    )
+
+
+def run_qwen_stream_json(
+    project_path: Path,
+    prompt_text: str,
+    effort: str | None,
+    max_wall_time: str,
+    max_tool_calls: str,
+) -> tuple[int, str, int, bool]:
+    """Run Qwen Code with stream-json output and parse only useful events."""
+    env = os.environ.copy()
+    env["QWEN_CODE_SUPPRESS_YOLO_WARNING"] = "1"
+
+    process = subprocess.Popen(
+        build_qwen_command(
+            effort=effort,
+            max_wall_time=max_wall_time,
+            max_tool_calls=max_tool_calls,
+            output_format="stream-json",
+        ),
+        cwd=project_path,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    final_text = ""
+    latest_assistant_text = ""
+    fatal_cancelled = False
+    token_usage = TokenUsageAccumulator()
+
+    assert process.stdout is not None
+    assert process.stdin is not None
+    try:
+        try:
+            process.stdin.write(prompt_text)
+            process.stdin.close()
+        except BrokenPipeError:
+            fatal_cancelled = True
+
+        for output_line in process.stdout:
+            stripped_line = output_line.rstrip()
+            if not stripped_line:
+                continue
+
+            if "FatalCancellationError" in stripped_line:
+                fatal_cancelled = True
+
+            event_type = stream_event_type(stripped_line)
+            if event_type == "error":
+                print(stripped_line, file=sys.stderr, flush=True)
+                continue
+
+            # Tool-result events can contain entire files. They cannot affect
+            # AFK's final response, so keep them out of stderr and memory.
+            if event_type not in STREAM_FINAL_EVENT_TYPES:
+                if not event_type:
+                    print(stripped_line, file=sys.stderr, flush=True)
+                continue
+
+            try:
+                event = json.loads(stripped_line)
+            except json.JSONDecodeError:
+                print(stripped_line, file=sys.stderr, flush=True)
+                continue
+
+            token_usage.add_event(event)
+            # Failed result events carry Qwen's structured cause in ``error``.
+            # Preserve that compact event for task_coder.py instead of losing
+            # it behind the last assistant progress message.
+            if event.get("error"):
+                print(stripped_line, file=sys.stderr, flush=True)
+            event_text = final_text_from_event(event)
+            if not event_text:
+                continue
+            if event.get("type") == "result":
+                final_text = event_text
+            else:
+                latest_assistant_text = event_text
+    finally:
+        if process.stdin and not process.stdin.closed:
+            process.stdin.close()
+
+    return (
+        int(process.wait()),
+        (final_text or latest_assistant_text).strip(),
+        token_usage.total_tokens(),
+        fatal_cancelled,
+    )
+
+
+def run_qwen_buffered(
+    project_path: Path,
+    prompt_text: str,
+    effort: str | None,
+    max_wall_time: str,
+    max_tool_calls: str,
+    output_format: str,
+    response_archive_file: Path | None = None,
+) -> tuple[int, str, int, bool]:
+    """Run Qwen Code without streaming and parse its final output."""
+    env = os.environ.copy()
+    env["QWEN_CODE_SUPPRESS_YOLO_WARNING"] = "1"
+    result = subprocess.run(
+        build_qwen_command(
+            effort=effort,
+            max_wall_time=max_wall_time,
+            max_tool_calls=max_tool_calls,
+            output_format=output_format,
+        ),
+        cwd=project_path,
+        env=env,
+        capture_output=True,
+        input=prompt_text,
+        text=True,
+        check=False,
+    )
+    for output_line in result.stderr.splitlines():
+        if output_line.strip():
+            print(output_line, file=sys.stderr, flush=True)
+
+    output_text = result.stdout.strip()
+    fatal_cancelled = has_fatal_cancellation_error(
+        result.stderr + "\n" + output_text
+    )
+    if result.returncode != 0 and output_text:
+        print(output_text, file=sys.stderr, flush=True)
+    if output_format == "json" and output_text:
+        try:
+            final_text, tokens_used = final_text_from_json_output(output_text)
+        except json.JSONDecodeError as e:
+            parse_error = (
+                "Could not parse Qwen JSON output: "
+                f"{e.msg} at line {e.lineno} column {e.colno}"
+            )
+            print(
+                parse_error,
+                file=sys.stderr,
+            )
+            append_response_to_archive(
+                response_archive_file,
+                f"ERROR: {parse_error}\n\n{output_text}",
+            )
+            return 1, "", 0, fatal_cancelled
+        return int(result.returncode), final_text.strip(), tokens_used, fatal_cancelled
+
+    return int(result.returncode), output_text, 0, fatal_cancelled
+
+
+def run_qwen_once(
+    project_path: Path,
+    prompt_text: str,
+    effort: str | None = None,
+    max_wall_time: str = DEFAULT_QWEN_MAX_WALL_TIME,
+    max_tool_calls: str = DEFAULT_QWEN_MAX_TOOL_CALLS,
+    output_format: str = DEFAULT_QWEN_OUTPUT_FORMAT,
+    response_archive_file: Path | None = None,
+) -> tuple[int, str, int, bool]:
+    """Run Qwen Code once and report whether it hit fatal cancellation."""
+    if output_format == "stream-json":
+        return run_qwen_stream_json(
+            project_path,
+            prompt_text,
+            effort,
+            max_wall_time,
+            max_tool_calls,
+        )
+
+    return run_qwen_buffered(
+        project_path,
+        prompt_text,
+        effort,
+        max_wall_time,
+        max_tool_calls,
+        output_format,
+        response_archive_file,
+    )
+
+
+def run_qwen(
+    project_path: Path,
+    prompt_text: str,
+    effort: str | None = None,
+    max_wall_time: str = DEFAULT_QWEN_MAX_WALL_TIME,
+    max_tool_calls: str = DEFAULT_QWEN_MAX_TOOL_CALLS,
+    output_format: str = DEFAULT_QWEN_OUTPUT_FORMAT,
+    response_archive_file: Path | None = None,
+) -> tuple[int, str, int]:
+    """Run Qwen Code with retries and return all reported tokens used."""
+    last_exit_code = 1
+    last_final_text = ""
+    total_tokens_used = 0
+
+    for retry_index, retry_delay in enumerate(FATAL_CANCELLATION_RETRY_DELAYS):
+        exit_code, final_text, tokens_used, fatal_cancelled = run_qwen_once(
+            project_path,
+            prompt_text,
+            effort,
+            max_wall_time,
+            max_tool_calls,
+            output_format,
+            response_archive_file,
+        )
+        total_tokens_used += tokens_used
+        if exit_code == 0 or not fatal_cancelled:
+            return exit_code, final_text, total_tokens_used
+
+        last_exit_code = exit_code
+        last_final_text = final_text
+        print(
+            "Qwen hit FatalCancellationError; retrying in "
+            f"{retry_delay}s ({retry_index + 1}/"
+            f"{len(FATAL_CANCELLATION_RETRY_DELAYS)})",
+            file=sys.stderr,
+            flush=True,
+        )
+        time.sleep(retry_delay)
+
+    exit_code, final_text, tokens_used, fatal_cancelled = run_qwen_once(
+        project_path,
+        prompt_text,
+        effort,
+        max_wall_time,
+        max_tool_calls,
+        output_format,
+        response_archive_file,
+    )
+    total_tokens_used += tokens_used
+    if exit_code == 0 or not fatal_cancelled:
+        return exit_code, final_text, total_tokens_used
+
+    print(
+        "Qwen hit FatalCancellationError after all retry attempts.",
+        file=sys.stderr,
+        flush=True,
+    )
+    return exit_code or last_exit_code, final_text or last_final_text, total_tokens_used
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Parse arguments, run Qwen Code, print the final response, and exit."""
+    parser = argparse.ArgumentParser(description="Run Qwen Code for one AFK prompt.")
+    parser.add_argument("--project-id", type=int)
+    parser.add_argument("--task-id", type=int)
+    parser.add_argument("--project-path", default=".", type=Path)
+    parser.add_argument("--effort")
+    parser.add_argument("--max-wall-time")
+    parser.add_argument("--max-tool-calls")
+    parser.add_argument("--output-format", choices=sorted(QWEN_OUTPUT_FORMATS))
+    parser.add_argument("--prompt-file", type=Path)
+    parser.add_argument("--response-archive-file", type=Path)
+    parser.add_argument("prompt", nargs="*")
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+
+    if shutil.which(QWEN_COMMAND) is None:
+        print("Qwen Code CLI was not found on PATH.", file=sys.stderr)
+        return 127
+
+    project_path = args.project_path.expanduser().resolve()
+    if not project_path.exists() or not project_path.is_dir():
+        print(f"Project path does not exist: {project_path}", file=sys.stderr)
+        return 2
+
+    prompt_text = read_prompt(args)
+    if not prompt_text:
+        print('Usage: python3 bin/tools/qwen.py --project-path /path "prompt"', file=sys.stderr)
+        return 2
+
+    try:
+        output_format = args.output_format or output_format_from_config()
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+
+    exit_code, final_text, tokens_used = run_qwen(
+        project_path,
+        prompt_text,
+        effort=args.effort or default_effort_from_config(),
+        max_wall_time=args.max_wall_time
+        or worker_model_config_value("max_wall_time", DEFAULT_QWEN_MAX_WALL_TIME),
+        max_tool_calls=args.max_tool_calls
+        or worker_model_config_value("max_tool_calls", DEFAULT_QWEN_MAX_TOOL_CALLS),
+        output_format=output_format,
+        response_archive_file=args.response_archive_file,
+    )
+    if args.project_id is not None:
+        increment_project_tokens(args.project_id, tokens_used, task_id=args.task_id)
+
+    if not archive_has_response(args.response_archive_file):
+        archive_response = final_text
+        if exit_code != 0:
+            archive_response = archive_response or f"qwen.py failed with status {exit_code}"
+        elif not archive_response:
+            archive_response = "ERROR: Qwen completed without a final result."
+        append_response_to_archive(args.response_archive_file, archive_response)
+
+    if exit_code != 0:
+        print(f"qwen.py failed with status {exit_code}.", file=sys.stderr)
+        if final_text:
+            print(
+                "Last Qwen assistant/result text before failure: "
+                + truncate_failure_detail(final_text),
+                file=sys.stderr,
+            )
+        return exit_code
+    if not final_text:
+        print("Qwen completed without a final result.", file=sys.stderr)
+        return 1
+
+    print(final_text)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

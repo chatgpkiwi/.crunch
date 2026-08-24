@@ -168,7 +168,7 @@ Output JSON:
 
 Only record IDs, names, and statuses are returned.
 
-### `tools/codex.py` and `tools/aider.py`
+### `tools/codex.py`, `tools/aider.py`, and `tools/qwen.py`
 
 Input: plain-text prompt, as a positional argument or stdin. The Aider adapter
 also requires a positive `--task-id` argument supplied by crunch.
@@ -191,9 +191,13 @@ base URL, API key, and task-specific
 parent project directory and explicitly supplies that project's editable text
 files, including untracked files, while excluding `.crunch`, `.git`, virtual
 environments, dependency trees, and generated caches. It does not make direct
-LLM HTTP calls. Both exit nonzero when their CLI fails or produces no final
-response. crunch must pass the claimed task ID to the adapter; do not invent
-a shared or root-level Aider history path.
+LLM HTTP calls. `qwen.py` requires provider `qwen` and launches the installed
+Qwen Code CLI from the parent project directory with optional limits and
+unattended approval mode. It does not pass authentication, endpoint, provider,
+or model flags; Qwen reads those from the invoking user's Qwen settings and
+owns model access. All adapters exit nonzero when their CLI fails or produces
+no final response. crunch must pass the claimed task ID to the Aider adapter;
+do not invent a shared or root-level Aider history path.
 
 ### `tools/crunch.py`
 
@@ -211,7 +215,7 @@ or:
 {"task_id":1,"task_status":"fail","fail_reason":"Reason for failure."}
 ```
 
-It selects the earliest `new` task from the earliest phase in `new` or `in_progress` status, marks it `in_progress`, then dispatches it to the `coding_agent.provider` adapter. It continues until no `new` tasks remain. It logs events to `logs/YYYY-MM-DD.log`. Aider receives up to two format reminders after an invalid response; a third invalid response is recorded as a failed task and stops the worker. An adapter process failure leaves the claimed task `in_progress` for inspection or retry.
+It selects the earliest `new` task from a phase in `new` or `in_progress` status only when every preceding task in project phase/task order is `complete`, marks it `in_progress`, then dispatches it to the `coding_agent.provider` adapter. A `fail` or `in_progress` predecessor therefore blocks all later tasks. It continues until no eligible `new` tasks remain. It logs events to `logs/YYYY-MM-DD.log`. Aider receives up to two format reminders after an invalid response; a third invalid response is recorded as a failed task and stops the worker. An adapter process failure leaves the claimed task `in_progress` for inspection or retry.
 
 ### `tools/fix_task.py`
 
@@ -224,7 +228,7 @@ required; do not substitute an in-process background command or wait for the
 worker to finish.
 
 1. Read `.crunch/config/config.yaml` and identify
-   `coding_agent.provider`. It may be `codex` or `aider`; do not
+   `coding_agent.provider`. It may be `codex`, `aider`, or `qwen`; do not
    assume a particular provider or model.
 2. Always launch through the provider-aware service launcher:
 
@@ -244,10 +248,10 @@ worker to finish.
 
 The launcher runs the worker as a user systemd service. This keeps it alive
 when the command-execution host cleans up background child processes after the
-launching shell exits. On AppArmor-enabled Linux hosts, it propagates the
-launcher's profile only for the Codex provider so Codex's Bubblewrap workspace
-sandbox can initialize normally. The Aider provider uses the user service
-manager's normal profile so it can reach host-local model endpoints.
+launching shell exits. It explicitly passes the launcher's `PATH` to the
+service, so provider CLIs installed in user-level locations remain available.
+On AppArmor-enabled Linux hosts, it also propagates the launcher's profile so
+Codex's Bubblewrap workspace sandbox can initialize normally.
 
 After a successful launch, do not wait for task completion. Tell the user:
 "We're on it. Check back later." When the user returns, query

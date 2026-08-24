@@ -20,6 +20,7 @@ CONFIG_PATH = ROOT / "config" / "config.yaml"
 AGENT_PROGRAMS = {
     "codex": Path(__file__).resolve().parent / "codex.py",
     "aider": Path(__file__).resolve().parent / "aider.py",
+    "qwen": Path(__file__).resolve().parent / "qwen.py",
 }
 UPDATE_TASK_PROGRAM = Path(__file__).resolve().parent / "update_task.py"
 LOG_DIRECTORY = ROOT / "logs"
@@ -45,7 +46,7 @@ def release_worker_lock(lock_file: TextIO) -> None:
 
 
 def get_next_task(database: Path) -> dict[str, object] | None:
-    """Return the next new task from the oldest eligible phase."""
+    """Return the first new task whose earlier project tasks all completed."""
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
         row = connection.execute(
@@ -61,7 +62,36 @@ def get_next_task(database: Path) -> dict[str, object] | None:
             JOIN project ON project.project_id = phases.parent_project_id
             WHERE tasks.task_status = 'new'
               AND phases.status IN ('new', 'in_progress')
-            ORDER BY phases.phase_order ASC, tasks.task_order ASC, tasks.task_id ASC
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM tasks AS earlier_tasks
+                  JOIN phases AS earlier_phases
+                    ON earlier_phases.phase_id = earlier_tasks.parent_phase_id
+                  WHERE earlier_phases.parent_project_id = project.project_id
+                    AND (
+                        earlier_phases.phase_order < phases.phase_order
+                        OR (
+                            earlier_phases.phase_order = phases.phase_order
+                            AND earlier_phases.phase_id < phases.phase_id
+                        )
+                        OR (
+                            earlier_phases.phase_id = phases.phase_id
+                            AND (
+                                earlier_tasks.task_order < tasks.task_order
+                                OR (
+                                    earlier_tasks.task_order = tasks.task_order
+                                    AND earlier_tasks.task_id < tasks.task_id
+                                )
+                            )
+                        )
+                    )
+                    AND earlier_tasks.task_status != 'complete'
+              )
+            ORDER BY
+                phases.phase_order ASC,
+                phases.phase_id ASC,
+                tasks.task_order ASC,
+                tasks.task_id ASC
             LIMIT 1
             """
         ).fetchone()
