@@ -1,6 +1,6 @@
 # Local crunch state may be edited by users, but the committed copy remains
 # available to every clone as the repository's baseline database.
-/database/crunch.db
+database/crunch.db
 
 # Python bytecode generated locally while running the tools.
 __pycache__/

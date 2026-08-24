@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run eligible tasks through codex.py until no new tasks remain."""
+"""Run eligible tasks through the configured coding-agent adapter."""
 
 from __future__ import annotations
 
@@ -16,7 +16,11 @@ from typing import Any, TextIO
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATABASE = ROOT / "database" / "crunch.db"
-CODEX_PROGRAM = Path(__file__).resolve().parent / "codex.py"
+CONFIG_PATH = ROOT / "config" / "config.yaml"
+AGENT_PROGRAMS = {
+    "codex": Path(__file__).resolve().parent / "codex.py",
+    "aider": Path(__file__).resolve().parent / "aider.py",
+}
 UPDATE_TASK_PROGRAM = Path(__file__).resolve().parent / "update_task.py"
 LOG_DIRECTORY = ROOT / "logs"
 LOCK_PATH = LOG_DIRECTORY / "crunch.lock"
@@ -137,6 +141,8 @@ report success unless the task is implemented and its relevant tests pass.
 
 ## Required Response
 
+Do not reply with prose, explanations, questions, code fences, etc.   
+
 Reply with exactly one JSON object and no surrounding text:
 
 ```json
@@ -148,14 +154,54 @@ or:
 ```json
 {{"task_status": "failed", "fail_reason": "reason for failure"}}
 ```
+
+Only reply after all your development process is complete, as a final answer, with nothing left to do or test. 
+
 """
 
 
-def _parse_codex_response(stdout: str) -> dict[str, str | None]:
-    """Validate Codex's required completion response."""
+
+
+def read_agent_provider(config_path: Path = CONFIG_PATH) -> str:
+    """Return the single configured provider from ``coding_agent``."""
+    try:
+        lines = config_path.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        raise ValueError(f"cannot read configuration: {error}") from error
+
+    fields: dict[str, str] = {}
+    in_agent = False
+    agent_blocks = 0
+    for line in lines:
+        content = line.split("#", 1)[0].rstrip()
+        if not content:
+            continue
+        if content == "coding_agent:":
+            agent_blocks += 1
+            if agent_blocks > 1:
+                raise ValueError("config.yaml must define exactly one coding_agent block")
+            in_agent = True
+            continue
+        if in_agent and not line.startswith((" ", "\t")):
+            in_agent = False
+        if in_agent and ":" in content:
+            key, value = content.strip().split(":", 1)
+            fields[key.strip()] = value.strip().strip("\"'")
+
+    provider = fields.get("provider")
+    if provider not in AGENT_PROGRAMS:
+        supported = ", ".join(sorted(AGENT_PROGRAMS))
+        raise ValueError(
+            f"config.yaml must define coding_agent.provider as one of: {supported}"
+        )
+    return provider
+
+
+def parse_agent_response(stdout: str) -> dict[str, str | None]:
+    """Validate an adapter's required completion response."""
     response = json.loads(stdout.strip())
     if not isinstance(response, dict):
-        raise ValueError("codex.py must return a JSON object")
+        raise ValueError("coding-agent adapter must return a JSON object")
     status = response.get("task_status")
     if status == "complete" and set(response) == {"task_status"}:
         return {"task_status": "complete", "fail_reason": None}
@@ -166,33 +212,38 @@ def _parse_codex_response(stdout: str) -> dict[str, str | None]:
         and response["fail_reason"].strip()
     ):
         return {"task_status": "fail", "fail_reason": response["fail_reason"].strip()}
-    raise ValueError("codex.py response must be complete or failed with a non-empty fail_reason")
+    raise ValueError("coding-agent response must be complete or failed with a non-empty fail_reason")
 
 
-def run_codex(prompt: str) -> dict[str, str | None]:
-    """Invoke codex.py with the assembled prompt and parse its JSON response."""
-    log_event("codex_invocation_started", prompt_length=len(prompt))
+def run_agent(provider: str, prompt: str, task_id: int) -> dict[str, str | None]:
+    """Invoke the configured adapter and parse its JSON response."""
+    program = AGENT_PROGRAMS[provider]
+    command = [sys.executable, str(program)]
+    if provider == "aider":
+        command.extend(("--task-id", str(task_id)))
+    log_event("agent_invocation_started", provider=provider, prompt_length=len(prompt), task_id=task_id)
     result = subprocess.run(
-        [sys.executable, str(CODEX_PROGRAM)],
+        command,
         input=prompt,
         text=True,
         capture_output=True,
         check=False,
     )
     log_event(
-        "codex_process_finished",
+        "agent_process_finished",
+        provider=provider,
         returncode=result.returncode,
         stdout_tail=result.stdout[-1000:],
         stderr_tail=result.stderr[-1000:],
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "no error output"
-        raise RuntimeError(f"codex.py exited with {result.returncode}: {detail[:1000]}")
-    return _parse_codex_response(result.stdout)
+        raise RuntimeError(f"{program.name} exited with {result.returncode}: {detail[:1000]}")
+    return parse_agent_response(result.stdout)
 
 
 def update_task(database: Path, task_id: int, outcome: dict[str, str | None]) -> None:
-    """Persist the Codex outcome through the project's task-update tool."""
+    """Persist a coding-agent outcome through the project's task-update tool."""
     payload = {"task_id": task_id, **outcome}
     if outcome["task_status"] == "complete":
         payload["task_end_date"] = datetime.now().astimezone().isoformat()
@@ -245,7 +296,13 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        log_event("worker_started", database=str(args.database), pid=__import__("os").getpid())
+        provider = read_agent_provider()
+        log_event(
+            "worker_started",
+            database=str(args.database),
+            pid=__import__("os").getpid(),
+            provider=provider,
+        )
         lock_file = acquire_worker_lock()
     except BlockingIOError:
         print("Another crunch worker is already running.", file=sys.stderr)
@@ -282,9 +339,15 @@ def main() -> int:
             log_event("task_claimed", task_id=task_id, phase_id=record["phase_id"])
 
             try:
-                outcome = run_codex(build_prompt(record))
+                outcome = run_agent(provider, build_prompt(record), task_id)
             except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
-                log_event("codex_invocation_failed", task_id=task_id, phase_id=record["phase_id"], reason=str(error))
+                log_event(
+                    "agent_invocation_failed",
+                    provider=provider,
+                    task_id=task_id,
+                    phase_id=record["phase_id"],
+                    reason=str(error),
+                )
                 print(f"Task {task_id} was not processed: {error}", file=sys.stderr)
                 return 1
 

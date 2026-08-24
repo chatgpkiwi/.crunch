@@ -50,25 +50,25 @@ def read_settings(config_path: Path = DEFAULT_CONFIG) -> CodexSettings:
         raise ValueError(f"cannot read configuration: {error}") from error
 
     fields: dict[str, str] = {}
-    in_default = False
+    in_agent = False
     for line in lines:
         content = line.split("#", 1)[0].rstrip()
         if not content:
             continue
-        if content == "  default:":
-            in_default = True
+        if content == "coding_agent:":
+            in_agent = True
             continue
-        if in_default and not line.startswith("    "):
-            in_default = False
-        if in_default and line.startswith("    ") and ":" in content:
+        if in_agent and not line.startswith((" ", "\t")):
+            in_agent = False
+        if in_agent and ":" in content:
             key, value = content.strip().split(":", 1)
             fields[key.strip()] = value.strip().strip("\"'")
 
     if fields.get("provider") != "codex":
-        raise ValueError("config.yaml must define coding_agents.default.provider as codex")
+        raise ValueError("config.yaml must define coding_agent.provider as codex")
     model = MODEL_ALIASES.get(fields.get("model", "").lower())
     if model is None:
-        raise ValueError("config.yaml must define coding_agents.default.model as 5.6 Luna")
+        raise ValueError("config.yaml must define coding_agent.model as 5.6 Luna")
     effort = fields.get("effort", "").lower()
     if effort not in VALID_EFFORTS:
         raise ValueError(f"unsupported Codex reasoning effort: {effort or '(missing)'}")
