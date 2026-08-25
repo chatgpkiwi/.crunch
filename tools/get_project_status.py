@@ -7,24 +7,25 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import sys
 from pathlib import Path
 
 
 DEFAULT_DATABASE = Path(__file__).resolve().parent.parent / "database" / "crunch.db"
 
 
-def get_project_status(database: Path = DEFAULT_DATABASE) -> dict[str, object] | None:
+def get_project_status(database: Path, project_id: int) -> dict[str, object] | None:
     """Return the project status tree, or ``None`` when no project exists."""
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
         project_row = connection.execute(
-            "SELECT project_id, project_name FROM project ORDER BY project_id LIMIT 1"
+            "SELECT project_id, project_name FROM project WHERE project_id = ?", (project_id,)
         ).fetchone()
         if project_row is None:
             return None
         phases = []
         phase_rows = connection.execute(
-            "SELECT phase_id, phase_name, status FROM phases ORDER BY phase_order, phase_id"
+            "SELECT phase_id, phase_name, status FROM phases WHERE parent_project_id = ? ORDER BY phase_order, phase_id", (project_id,)
         ).fetchall()
         for phase_row in phase_rows:
             phase = dict(phase_row)
@@ -49,9 +50,17 @@ def get_project_status(database: Path = DEFAULT_DATABASE) -> dict[str, object] |
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("json", nargs="?", help="JSON project ID; read stdin when omitted")
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
     args = parser.parse_args()
-    print(json.dumps(get_project_status(args.database), ensure_ascii=False))
+    try:
+        project_id = json.loads(args.json if args.json is not None else sys.stdin.read())
+        if isinstance(project_id, bool) or not isinstance(project_id, int):
+            raise ValueError("project input must be a JSON integer")
+        result = get_project_status(args.database, project_id)
+    except (ValueError, json.JSONDecodeError, sqlite3.Error) as error:
+        parser.error(str(error))
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 

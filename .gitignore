@@ -2,6 +2,10 @@
 # available to every clone as the repository's baseline database.
 database/crunch.db
 
+# Child projects are independent repositories with their own remotes.
+/projects/*
+!/projects/.gitkeep
+
 # Python bytecode generated locally while running the tools.
 __pycache__/
 *.py[cod]
@@ -9,4 +13,5 @@ __pycache__/
 # Keep the directory in the repository, but ignore generated log contents.
 /logs/*
 !/logs/.gitkeep
+
 .aider*
