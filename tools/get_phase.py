@@ -14,26 +14,28 @@ from pathlib import Path
 DEFAULT_DATABASE = Path(__file__).resolve().parent.parent / "database" / "crunch.db"
 
 
-def _read_phase_id(value: str | None) -> int:
+def _read_phase_id(value: str | None) -> tuple[int, int]:
     raw = value if value is not None else sys.stdin.read()
-    phase_id = json.loads(raw)
-    if isinstance(phase_id, bool) or not isinstance(phase_id, int):
-        raise ValueError("phase input must be a JSON integer")
-    return phase_id
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("phase input must be a JSON object")
+    phase_id, project_id = payload.get("phase_id"), payload.get("project_id")
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in (phase_id, project_id)):
+        raise ValueError("phase_id and project_id must be integers")
+    return phase_id, project_id
 
 
-def get_phase(database: Path, phase_id: int) -> dict[str, object] | None:
+def get_phase(database: Path, phase_id: int, project_id: int) -> dict[str, object] | None:
     """Return the phase identified by ``phase_id``, or ``None`` if absent."""
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
         row = connection.execute(
             """
             SELECT phase_id, parent_project_id, phase_name, phase_summary, status, deliverables,
-                   architecture_contract, acceptance_checklist, fail_reason, phase_order
+                   architecture_contract, acceptance_checklist, fail_reason, completion_summary, phase_order
             FROM phases
-            WHERE phase_id = ?
-            """,
-            (phase_id,),
+            WHERE phase_id = ? AND parent_project_id = ?
+            """, (phase_id, project_id),
         ).fetchone()
     return dict(row) if row is not None else None
 
@@ -44,7 +46,7 @@ def main() -> int:
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
     args = parser.parse_args()
     try:
-        phase = get_phase(args.database, _read_phase_id(args.json))
+        phase = get_phase(args.database, *_read_phase_id(args.json))
     except (ValueError, json.JSONDecodeError, sqlite3.Error) as error:
         parser.error(str(error))
     print(json.dumps(phase, ensure_ascii=False))

@@ -2,8 +2,7 @@
 set -euo pipefail
 
 CRUNCH_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-PROJECT_ROOT=$(cd "$CRUNCH_ROOT/.." && pwd)
-UNIT_SUFFIX=$(printf '%s' "$PROJECT_ROOT" | sha256sum | cut -c1-12)
+UNIT_SUFFIX=$(printf '%s' "$CRUNCH_ROOT" | sha256sum | cut -c1-12)
 UNIT_NAME="crunch-worker-${UNIT_SUFFIX}.service"
 LOCK_PATH="$CRUNCH_ROOT/logs/crunch.lock"
 

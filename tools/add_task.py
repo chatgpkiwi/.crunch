@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Expected JSON: {"parent_phase_id": 1, "tasks": [{"task_name": "...", "task_instructions": "...", "task_status": "new", "task_order": 1, "task_start_date": null, "task_end_date": null, "fail_reason": null, "test_results": null}]}
+# Expected JSON: {"parent_phase_id": 1, "tasks": [{"task_name": "...", "task_instructions": "...", "task_status": "new", "task_order": 1, "task_start_date": null, "task_end_date": null, "fail_reason": null, "completion_summary": null, "test_results": null}]}
 """Insert one or more tasks (parts) into a phase."""
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ def _read_payload(value: str | None) -> dict[str, Any]:
         raise ValueError("task input must be a JSON object")
     if isinstance(payload.get("parent_phase_id"), bool) or not isinstance(payload.get("parent_phase_id"), int):
         raise ValueError("parent_phase_id must be an integer")
+    if isinstance(payload.get("project_id"), bool) or not isinstance(payload.get("project_id"), int):
+        raise ValueError("project_id must be an integer")
     tasks = payload.get("tasks")
     if not isinstance(tasks, list) or not tasks:
         raise ValueError("tasks must be a non-empty array")
@@ -36,6 +38,8 @@ def _read_payload(value: str | None) -> dict[str, Any]:
             raise ValueError(f"task_status must be one of: {', '.join(sorted(STATUSES))}")
         if "task_order" in task and (isinstance(task["task_order"], bool) or not isinstance(task["task_order"], int)):
             raise ValueError("task_order must be an integer")
+        if "completion_summary" in task and task["completion_summary"] is not None and not isinstance(task["completion_summary"], str):
+            raise ValueError("completion_summary must be a string or null")
     return payload
 
 
@@ -45,13 +49,15 @@ def add_tasks(database: Path, payload: dict[str, Any]) -> list[int]:
     inserted_ids: list[int] = []
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
+        if connection.execute("SELECT 1 FROM phases WHERE phase_id = ? AND parent_project_id = ?", (payload["parent_phase_id"], payload["project_id"])).fetchone() is None:
+            raise ValueError("parent_phase_id does not belong to project_id")
         for index, task in enumerate(payload["tasks"], start=1):
             cursor = connection.execute(
                 """
                 INSERT INTO tasks (
                     parent_phase_id, task_name, task_status, task_instructions,
-                    task_start_date, task_end_date, fail_reason, task_order, test_results
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    task_start_date, task_end_date, fail_reason, completion_summary, task_order, test_results
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload["parent_phase_id"],
@@ -61,6 +67,7 @@ def add_tasks(database: Path, payload: dict[str, Any]) -> list[int]:
                     task.get("task_start_date"),
                     task.get("task_end_date"),
                     task.get("fail_reason"),
+                    task.get("completion_summary"),
                     task.get("task_order", index),
                     task.get("test_results"),
                 ),

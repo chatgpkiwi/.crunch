@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Expected JSON: {"phase_id": 1, "parent_project_id": 1, "phase_name": "Foundation", "phase_summary": "...", "status": "new", "deliverables": "...", "architecture_contract": "...", "acceptance_checklist": "...", "fail_reason": null, "phase_order": 1}
+# Expected JSON: {"phase_id": 1, "parent_project_id": 1, "phase_name": "Foundation", "phase_summary": "...", "status": "new", "deliverables": "...", "architecture_contract": "...", "acceptance_checklist": "...", "fail_reason": null, "completion_summary": null, "phase_order": 1}
 """Insert a project phase into the SQLite database."""
 
 from __future__ import annotations
@@ -38,6 +38,8 @@ def _read_payload(value: str | None) -> dict[str, Any]:
             raise ValueError(f"{field} must be an integer")
     if "fail_reason" in payload and payload["fail_reason"] is not None and not isinstance(payload["fail_reason"], str):
         raise ValueError("fail_reason must be a string or null")
+    if "completion_summary" in payload and payload["completion_summary"] is not None and not isinstance(payload["completion_summary"], str):
+        raise ValueError("completion_summary must be a string or null")
     return payload
 
 
@@ -50,12 +52,12 @@ def add_phase(database: Path, payload: dict[str, Any]) -> int:
             """
             INSERT INTO phases (
                 phase_id, parent_project_id, phase_name, status, deliverables,
-                phase_summary, architecture_contract, acceptance_checklist, fail_reason, phase_order
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                phase_summary, architecture_contract, acceptance_checklist, fail_reason, completion_summary, phase_order
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payload.get("phase_id"),
-                payload.get("parent_project_id", 1),
+                payload["parent_project_id"],
                 payload["phase_name"].strip(),
                 payload.get("status", "new"),
                 payload["deliverables"],
@@ -63,6 +65,7 @@ def add_phase(database: Path, payload: dict[str, Any]) -> int:
                 payload["architecture_contract"],
                 payload["acceptance_checklist"],
                 payload.get("fail_reason"),
+                payload.get("completion_summary"),
                 payload.get("phase_order", payload.get("phase_id")),
             ),
         )
@@ -76,6 +79,8 @@ def main() -> int:
     args = parser.parse_args()
     try:
         payload = _read_payload(args.json)
+        if "parent_project_id" not in payload:
+            raise ValueError("parent_project_id is required")
         if "phase_order" not in payload and "phase_id" not in payload:
             raise ValueError("phase_order or phase_id is required")
         phase_id = add_phase(args.database, payload)

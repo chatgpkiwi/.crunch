@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Expected JSON: {"project_id": 1, "project_name": "...", "description": "...", "root_path": "/path/to/project"}
+# Expected JSON: {"project_id": 1, "project_name": "...", "description": "...", "toolchain": "...", "workspace_path": "/path/to/project"}
 """Create or replace the project's SQLite metadata record."""
 
 from __future__ import annotations
@@ -21,19 +21,21 @@ def _read_payload(value: str | None) -> dict[str, Any]:
     payload = json.loads(raw)
     if not isinstance(payload, dict):
         raise ValueError("project JSON must be an object")
-    for field in ("project_name", "description"):
+    for field in ("project_name", "description", "toolchain"):
         if not isinstance(payload.get(field), str) or not payload[field].strip():
             raise ValueError(f"{field} must be a non-empty string")
     if "project_id" in payload and not isinstance(payload["project_id"], int):
         raise ValueError("project_id must be an integer")
-    if "root_path" in payload and payload["root_path"] is not None and not isinstance(payload["root_path"], str):
-        raise ValueError("root_path must be a string or null")
+    workspace_path = payload.get("workspace_path", payload.get("root_path"))
+    if not isinstance(workspace_path, str) or not workspace_path.strip():
+        raise ValueError("workspace_path must be a non-empty string")
+    payload["workspace_path"] = workspace_path
     return payload
 
 
 def upsert_project(database: Path, payload: dict[str, Any]) -> None:
     """Insert the project, replacing the existing record with the same ID."""
-    project_id = payload.get("project_id", 1)
+    project_id = payload.get("project_id")
     now = datetime.now(timezone.utc).isoformat()
     database.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(database) as connection:
@@ -41,19 +43,21 @@ def upsert_project(database: Path, payload: dict[str, Any]) -> None:
         connection.execute(
             """
             INSERT INTO project (
-                project_id, project_name, description, root_path, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                project_id, project_name, description, toolchain, workspace_path, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(project_id) DO UPDATE SET
                 project_name = excluded.project_name,
                 description = excluded.description,
-                root_path = excluded.root_path,
+                toolchain = excluded.toolchain,
+                workspace_path = excluded.workspace_path,
                 updated_at = excluded.updated_at
             """,
             (
                 project_id,
                 payload["project_name"].strip(),
                 payload["description"].strip(),
-                payload.get("root_path"),
+                payload["toolchain"].strip(),
+                str(Path(payload["workspace_path"]).expanduser().resolve()),
                 now,
                 now,
             ),

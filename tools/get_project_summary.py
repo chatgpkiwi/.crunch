@@ -26,11 +26,14 @@ def _read_options(value: str | None) -> dict[str, Any]:
     options = json.loads(raw)
     if not isinstance(options, dict):
         raise ValueError("summary input must be a JSON object")
-    if "phase_id" in options and (isinstance(options["phase_id"], bool) or not isinstance(options["phase_id"], int)):
-        raise ValueError("phase_id must be an integer")
+    for field in ("project_id", "phase_id"):
+        if field in options and (isinstance(options[field], bool) or not isinstance(options[field], int)):
+            raise ValueError(f"{field} must be an integer")
+    if "project_id" not in options:
+        raise ValueError("project_id is required")
     if "output" in options and options["output"] != "simple":
         raise ValueError("output must be \"simple\" when provided")
-    unknown = set(options) - {"phase_id", "output"}
+    unknown = set(options) - {"project_id", "phase_id", "output"}
     if unknown:
         raise ValueError(f"unknown summary options: {', '.join(sorted(unknown))}")
     return options
@@ -45,23 +48,24 @@ def get_project_summary(database: Path, options: dict[str, Any] | None = None) -
     options = options or {}
     simple = options.get("output") == "simple"
     phase_id = options.get("phase_id")
+    project_id = options["project_id"]
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
         project_row = connection.execute(
-            "SELECT project_id, project_name, description, root_path, created_at, updated_at FROM project ORDER BY project_id LIMIT 1"
+            "SELECT project_id, project_name, description, toolchain, workspace_path, created_at, updated_at FROM project WHERE project_id = ?", (project_id,)
         ).fetchone()
         if project_row is None:
             return None
         phase_sql = """
             SELECT phase_id, parent_project_id, phase_name, phase_summary, status,
                    deliverables, architecture_contract, acceptance_checklist,
-                   fail_reason, phase_order
-            FROM phases
+                   fail_reason, completion_summary, phase_order
+            FROM phases WHERE parent_project_id = ?
         """
-        phase_parameters: tuple[object, ...] = ()
+        phase_parameters: tuple[object, ...] = (project_id,)
         if phase_id is not None:
-            phase_sql += " WHERE phase_id = ?"
-            phase_parameters = (phase_id,)
+            phase_sql += " AND phase_id = ?"
+            phase_parameters = (project_id, phase_id)
         phase_sql += " ORDER BY phase_order, phase_id"
         phase_rows = connection.execute(phase_sql, phase_parameters).fetchall()
         phases: list[dict[str, object]] = []
@@ -70,7 +74,7 @@ def get_project_summary(database: Path, options: dict[str, Any] | None = None) -
             task_rows = connection.execute(
                 """
                 SELECT task_id, parent_phase_id, task_name, task_status, task_instructions,
-                       task_start_date, task_end_date, fail_reason, task_order, test_results
+                       task_start_date, task_end_date, fail_reason, completion_summary, task_order, test_results
                 FROM tasks WHERE parent_phase_id = ? ORDER BY task_order, task_id
                 """,
                 (phase["phase_id"],),

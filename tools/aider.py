@@ -21,7 +21,6 @@ from pathlib import Path
 
 
 crunch_ROOT = Path(__file__).resolve().parent.parent
-PROJECT_ROOT = crunch_ROOT.parent
 DEFAULT_CONFIG = crunch_ROOT / "config" / "config.yaml"
 LOG_DIRECTORY = crunch_ROOT / "logs"
 AIDER_COMMAND = "aider"
@@ -47,19 +46,24 @@ INVALID_RESPONSE_FAILURE_REASON = (
     "Aider did not produce a recognizable task-status JSON object after the initial response and two format reminders."
 )
 JSON_OBJECT_PATTERN = re.compile(r"\{[^{}]*\}")
-FORMAT_REMINDER = """This is an unattended development cycle. Your previous reply was invalid.
+TASK_FORMAT_REMINDER = """This is an unattended development cycle. Your previous reply was invalid.
 
 Reply now with exactly one JSON object and no other text, Markdown, code fence, question, explanation, or request for files. No other replies will be accepted. You must not ask for more information. Inspect the workspace and complete the assigned task using the existing context.
 
 Reply with exactly one of:
-{"task_status":"complete"}
+{"task_status":"complete","completion_summary":"- feature, contract, or interface established"}
 {"task_status":"failed","fail_reason":"specific reason"}
+"""
+PHASE_SUMMARY_FORMAT_REMINDER = """Your previous phase-consolidation reply was invalid.
+
+Reply now with exactly one JSON object and no other text:
+{"completion_summary":"- consolidated feature, contract, or interface"}
 """
 
 
 @dataclass(frozen=True)
 class AiderSettings:
-    """The Aider CLI settings read from ``coding_agent``."""
+    """The Aider CLI settings read from one named coding agent."""
 
     model: str
     openai_api_base: str
@@ -76,35 +80,42 @@ def log_event(event: str, **fields: object) -> None:
         log_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
-def read_agent_fields(config_path: Path) -> dict[str, str]:
-    """Read scalar fields from the project's small coding-agent YAML section."""
+def read_agent_fields(config_path: Path, agent_name: str) -> dict[str, str]:
+    """Read scalar fields for one named coding agent."""
     try:
         lines = config_path.read_text(encoding="utf-8").splitlines()
     except OSError as error:
         raise ValueError(f"cannot read configuration: {error}") from error
 
     fields: dict[str, str] = {}
+    in_agents = False
     in_agent = False
     for line in lines:
         content = line.split("#", 1)[0].rstrip()
         if not content:
             continue
-        if content == "coding_agent:":
+        if content == "coding_agents:":
+            in_agents = True
+            continue
+        if in_agents and not line.startswith((" ", "\t")):
+            in_agents = False
+            in_agent = False
+        if in_agents and line.startswith(("  ", "\t")) and not line.startswith(("    ", "\t\t")) and content.strip() == f"{agent_name}:":
             in_agent = True
             continue
-        if in_agent and not line.startswith((" ", "\t")):
+        if in_agent and line.startswith(("  ", "\t")) and not line.startswith(("    ", "\t\t")):
             in_agent = False
-        if in_agent and ":" in content:
+        if in_agent and line.startswith(("    ", "\t\t")) and ":" in content:
             key, value = content.strip().split(":", 1)
             fields[key.strip()] = value.strip().strip("\"'")
     return fields
 
 
-def read_settings(config_path: Path = DEFAULT_CONFIG) -> AiderSettings:
+def read_settings(config_path: Path = DEFAULT_CONFIG, agent_name: str = "default_task_agent") -> AiderSettings:
     """Read and validate the Aider settings needed for an Aider CLI run."""
-    fields = read_agent_fields(config_path)
+    fields = read_agent_fields(config_path, agent_name)
     if fields.get("provider") != "aider":
-        raise ValueError("config.yaml must define coding_agent.provider as aider")
+        raise ValueError(f"config.yaml must define coding_agents.{agent_name}.provider as aider")
     required = ("model", "openai-api-base", "openai-api-key")
     missing = [field for field in required if not fields.get(field)]
     if missing:
@@ -134,17 +145,17 @@ def is_text_file(path: Path) -> bool:
         return False
 
 
-def project_files() -> list[Path]:
+def project_files(workspace: Path) -> list[Path]:
     """Find editable text files in the project that contains ``.crunch``.
 
     Aider's repository map only includes Git-tracked files.  A project may not
     yet have a Git repository, or may have untracked files, so explicitly add
-    the parent project's text files.  Keep crunch's own state and generated
+    the selected child project's text files. Keep Crunch's own state and generated
     caches out of the coding session.
     """
     files: list[Path] = []
-    for path in PROJECT_ROOT.rglob("*"):
-        relative_path = path.relative_to(PROJECT_ROOT)
+    for path in workspace.rglob("*"):
+        relative_path = path.relative_to(workspace)
         if any(part in EXCLUDED_PROJECT_DIRECTORIES for part in relative_path.parts):
             continue
         if (
@@ -189,7 +200,7 @@ def build_command(
     return command
 
 
-def extract_completion_response(output: str) -> str:
+def extract_completion_response(output: str, response_kind: str = "task") -> str:
     """Return a valid task-status JSON object found anywhere in Aider output.
 
     Aider commonly wraps its final JSON status in prose or a Markdown code
@@ -201,9 +212,26 @@ def extract_completion_response(output: str) -> str:
             response = json.loads(match.group(0))
         except json.JSONDecodeError:
             continue
-        if response == {"task_status": "complete"}:
+        if (
+            response_kind == "phase-summary"
+            and isinstance(response, dict)
+            and set(response) == {"completion_summary"}
+            and isinstance(response.get("completion_summary"), str)
+            and response["completion_summary"].strip()
+        ):
             return json.dumps(response, ensure_ascii=False)
         if (
+            response_kind == "task"
+            and isinstance(response, dict)
+            and set(response) == {"task_status", "completion_summary"}
+            and response.get("task_status") == "complete"
+            and isinstance(response.get("completion_summary"), str)
+            and response["completion_summary"].strip()
+        ):
+            return json.dumps(response, ensure_ascii=False)
+        if (
+            response_kind == "task"
+            and
             isinstance(response, dict)
             and set(response) == {"task_status", "fail_reason"}
             and response.get("task_status") == "failed"
@@ -214,7 +242,7 @@ def extract_completion_response(output: str) -> str:
     raise RuntimeError("Aider output did not contain a valid task-status JSON object")
 
 
-def run_aider(prompt: str, settings: AiderSettings, task_id: int) -> str:
+def run_aider(prompt: str, settings: AiderSettings, task_id: int, workspace: Path, response_kind: str = "task") -> str:
     """Run Aider and return its textual one-shot response."""
     if task_id < 1:
         raise ValueError("task_id must be a positive integer")
@@ -224,15 +252,16 @@ def run_aider(prompt: str, settings: AiderSettings, task_id: int) -> str:
     with tempfile.TemporaryDirectory(prefix="crunch-aider-") as temporary_directory:
         prompt_path = Path(temporary_directory) / "prompt.md"
         history_path = LOG_DIRECTORY / f"task-{task_id}-aider-chat-history.md"
-        editable_files = project_files()
-        prompts = [prompt, *([FORMAT_REMINDER] * MAX_INVALID_RESPONSE_RETRIES)]
+        editable_files = project_files(workspace)
+        reminder = TASK_FORMAT_REMINDER if response_kind == "task" else PHASE_SUMMARY_FORMAT_REMINDER
+        prompts = [prompt, *([reminder] * MAX_INVALID_RESPONSE_RETRIES)]
         for attempt, current_prompt in enumerate(prompts):
             prompt_path.write_text(current_prompt, encoding="utf-8")
             command = build_command(settings, prompt_path, task_id, editable_files)
             log_event(
                 "invocation_started",
                 model=settings.model,
-                project_root=str(PROJECT_ROOT),
+                project_root=str(workspace),
                 task_id=task_id,
                 editable_file_count=len(editable_files),
                 chat_history_file=str(history_path),
@@ -241,7 +270,7 @@ def run_aider(prompt: str, settings: AiderSettings, task_id: int) -> str:
             )
             result = subprocess.run(
                 command,
-                cwd=PROJECT_ROOT,
+                cwd=workspace,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -257,10 +286,12 @@ def run_aider(prompt: str, settings: AiderSettings, task_id: int) -> str:
                 detail = result.stderr.strip() or result.stdout.strip() or "no error output"
                 raise RuntimeError(f"Aider exited with {result.returncode}: {detail[:1000]}")
             try:
-                return extract_completion_response(result.stdout)
+                return extract_completion_response(result.stdout, response_kind)
             except RuntimeError:
                 log_event("invalid_completion_response", task_id=task_id, attempt=attempt + 1)
 
+        if response_kind == "phase-summary":
+            raise RuntimeError("Aider did not produce a recognizable phase completion-summary JSON object")
         return json.dumps(
             {"task_status": "failed", "fail_reason": INVALID_RESPONSE_FAILURE_REASON},
             ensure_ascii=False,
@@ -272,13 +303,19 @@ def main(arguments: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("prompt", nargs="?", help="prompt text; read stdin when omitted")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--agent", default="default_task_agent")
     parser.add_argument("--task-id", type=int, required=True, help="crunch task ID for the isolated Aider chat history file")
+    parser.add_argument("--response-kind", choices=("task", "phase-summary"), default="task")
+    parser.add_argument("--project-workspace", type=Path, required=True)
     args = parser.parse_args(arguments)
     try:
         prompt = read_prompt(args.prompt)
         if not prompt.strip():
             raise ValueError("prompt cannot be empty")
-        print(run_aider(prompt, read_settings(args.config), args.task_id))
+        workspace = args.project_workspace.expanduser().resolve()
+        if not workspace.is_dir():
+            raise ValueError(f"project workspace does not exist: {workspace}")
+        print(run_aider(prompt, read_settings(args.config, args.agent), args.task_id, workspace, args.response_kind))
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         log_event("invocation_failed", reason=str(error))
         print(f"aider.py: {error}", file=sys.stderr)

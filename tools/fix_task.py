@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Expected JSON: {"task_id": 1, "task_instructions": "Replacement instructions."}
+# Expected JSON: {"project_id": 1, "task_id": 1, "task_instructions": "Replacement instructions."}
 """Reset a failed task for a deterministic retry."""
 
 from __future__ import annotations
@@ -20,13 +20,13 @@ def _read_payload(value: str | None) -> dict[str, Any]:
     payload = json.loads(raw)
     if not isinstance(payload, dict):
         raise ValueError("fix input must be a JSON object")
-    task_id = payload.get("task_id")
-    if isinstance(task_id, bool) or not isinstance(task_id, int):
-        raise ValueError("task_id must be an integer")
+    for field in ("project_id", "task_id"):
+        if isinstance(payload.get(field), bool) or not isinstance(payload.get(field), int):
+            raise ValueError(f"{field} must be an integer")
     instructions = payload.get("task_instructions")
     if not isinstance(instructions, str) or not instructions.strip():
         raise ValueError("task_instructions must be a non-empty string")
-    unknown = set(payload) - {"task_id", "task_instructions"}
+    unknown = set(payload) - {"project_id", "task_id", "task_instructions"}
     if unknown:
         raise ValueError(f"unknown fix fields: {', '.join(sorted(unknown))}")
     return payload
@@ -44,20 +44,21 @@ def fix_task(database: Path, payload: dict[str, Any]) -> dict[str, object]:
                 task_start_date = NULL,
                 task_end_date = NULL,
                 fail_reason = NULL,
-                test_results = NULL
-            WHERE task_id = ?
-            """,
-            (payload["task_instructions"].strip(), payload["task_id"]),
+                completion_summary = NULL,
+                test_results = NULL,
+                retry_count = retry_count + 1
+            WHERE task_id = ? AND EXISTS (SELECT 1 FROM phases WHERE phases.phase_id = tasks.parent_phase_id AND phases.parent_project_id = ?)
+            """, (payload["task_instructions"].strip(), payload["task_id"], payload["project_id"]),
         )
         if cursor.rowcount != 1:
             raise ValueError(f"task {payload['task_id']} does not exist")
         row = connection.execute(
             """
-            SELECT task_id, parent_phase_id, task_name, task_status, task_instructions,
-                   task_start_date, task_end_date, fail_reason, task_order, test_results
-            FROM tasks WHERE task_id = ?
-            """,
-            (payload["task_id"],),
+            SELECT tasks.task_id, tasks.parent_phase_id, tasks.task_name, tasks.task_status, tasks.task_instructions,
+                   tasks.task_start_date, tasks.task_end_date, tasks.fail_reason, tasks.completion_summary, tasks.retry_count, tasks.task_order, tasks.test_results
+            FROM tasks JOIN phases ON phases.phase_id = tasks.parent_phase_id
+            WHERE tasks.task_id = ? AND phases.parent_project_id = ?
+            """, (payload["task_id"], payload["project_id"]),
         ).fetchone()
     assert row is not None
     return dict(row)

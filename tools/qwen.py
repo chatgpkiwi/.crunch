@@ -23,7 +23,6 @@ from typing import Any
 
 
 CRUNCH_ROOT = Path(__file__).resolve().parent.parent
-PROJECT_ROOT = CRUNCH_ROOT.parent
 DEFAULT_CONFIG = CRUNCH_ROOT / "config" / "config.yaml"
 LOG_DIRECTORY = CRUNCH_ROOT / "logs"
 QWEN_COMMAND = "qwen"
@@ -36,19 +35,24 @@ INVALID_RESPONSE_FAILURE_REASON = (
 )
 JSON_OBJECT_PATTERN = re.compile(r"\{[^{}]*\}")
 QWEN_API_ERROR_PATTERN = re.compile(r"^\[API Error:\s*(.*?)\]$", re.IGNORECASE | re.DOTALL)
-FORMAT_REMINDER = """This is an unattended development cycle. Your previous reply was invalid.
+TASK_FORMAT_REMINDER = """This is an unattended development cycle. Your previous reply was invalid.
 
 Reply now with exactly one JSON object and no other text, Markdown, code fence, question, explanation, or request for files. You must not ask for more information. Inspect the workspace and complete the assigned task using the existing context.
 
 Reply with exactly one of:
-{"task_status":"complete"}
+{"task_status":"complete","completion_summary":"- feature, contract, or interface established"}
 {"task_status":"failed","fail_reason":"specific reason"}
+"""
+PHASE_SUMMARY_FORMAT_REMINDER = """Your previous phase-consolidation reply was invalid.
+
+Reply now with exactly one JSON object and no other text:
+{"completion_summary":"- consolidated feature, contract, or interface"}
 """
 
 
 @dataclass(frozen=True)
 class QwenSettings:
-    """The Qwen invocation controls read from ``coding_agent``."""
+    """The Qwen invocation controls read from one named coding agent."""
 
     max_wall_time: str | None
     max_tool_calls: str | None
@@ -66,35 +70,42 @@ def log_event(event: str, **fields: object) -> None:
         log_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
-def read_agent_fields(config_path: Path) -> dict[str, str]:
-    """Read scalar fields from the project's small coding-agent YAML section."""
+def read_agent_fields(config_path: Path, agent_name: str) -> dict[str, str]:
+    """Read scalar fields for one named coding agent."""
     try:
         lines = config_path.read_text(encoding="utf-8").splitlines()
     except OSError as error:
         raise ValueError(f"cannot read configuration: {error}") from error
 
     fields: dict[str, str] = {}
+    in_agents = False
     in_agent = False
     for line in lines:
         content = line.split("#", 1)[0].rstrip()
         if not content:
             continue
-        if content == "coding_agent:":
+        if content == "coding_agents:":
+            in_agents = True
+            continue
+        if in_agents and not line.startswith((" ", "\t")):
+            in_agents = False
+            in_agent = False
+        if in_agents and line.startswith(("  ", "\t")) and not line.startswith(("    ", "\t\t")) and content.strip() == f"{agent_name}:":
             in_agent = True
             continue
-        if in_agent and not line.startswith((" ", "\t")):
+        if in_agent and line.startswith(("  ", "\t")) and not line.startswith(("    ", "\t\t")):
             in_agent = False
-        if in_agent and ":" in content:
+        if in_agent and line.startswith(("    ", "\t\t")) and ":" in content:
             key, value = content.strip().split(":", 1)
             fields[key.strip()] = value.strip().strip("\"'")
     return fields
 
 
-def read_settings(config_path: Path = DEFAULT_CONFIG) -> QwenSettings:
+def read_settings(config_path: Path = DEFAULT_CONFIG, agent_name: str = "default_task_agent") -> QwenSettings:
     """Read Qwen run controls without overriding the user's Qwen settings."""
-    fields = read_agent_fields(config_path)
+    fields = read_agent_fields(config_path, agent_name)
     if fields.get("provider") != "qwen":
-        raise ValueError("config.yaml must define coding_agent.provider as qwen")
+        raise ValueError(f"config.yaml must define coding_agents.{agent_name}.provider as qwen")
     output_format = fields.get("output-format", DEFAULT_OUTPUT_FORMAT).lower()
     if output_format not in VALID_OUTPUT_FORMATS:
         allowed = ", ".join(sorted(VALID_OUTPUT_FORMATS))
@@ -188,16 +199,33 @@ def response_text(output: str, output_format: str) -> str:
     return (final_text or assistant_text).strip()
 
 
-def extract_completion_response(output: str) -> str:
+def extract_completion_response(output: str, response_kind: str = "task") -> str:
     """Find and normalize a valid task-status JSON object in Qwen's reply."""
     for match in reversed(list(JSON_OBJECT_PATTERN.finditer(output))):
         try:
             response = json.loads(match.group(0))
         except json.JSONDecodeError:
             continue
-        if response == {"task_status": "complete"}:
+        if (
+            response_kind == "phase-summary"
+            and isinstance(response, dict)
+            and set(response) == {"completion_summary"}
+            and isinstance(response.get("completion_summary"), str)
+            and response["completion_summary"].strip()
+        ):
             return json.dumps(response, ensure_ascii=False)
         if (
+            response_kind == "task"
+            and isinstance(response, dict)
+            and set(response) == {"task_status", "completion_summary"}
+            and response.get("task_status") == "complete"
+            and isinstance(response.get("completion_summary"), str)
+            and response["completion_summary"].strip()
+        ):
+            return json.dumps(response, ensure_ascii=False)
+        if (
+            response_kind == "task"
+            and
             isinstance(response, dict)
             and set(response) == {"task_status", "fail_reason"}
             and response.get("task_status") == "failed"
@@ -215,7 +243,7 @@ def raise_for_qwen_api_error(output: str) -> None:
         raise RuntimeError(f"Qwen Code reported an API error: {match.group(1).strip()}")
 
 
-def run_qwen(prompt: str, settings: QwenSettings) -> str:
+def run_qwen(prompt: str, settings: QwenSettings, workspace: Path, response_kind: str = "task") -> str:
     """Run Qwen Code and return a normalized task-status response."""
     if not shutil.which(QWEN_COMMAND):
         log_event("qwen_not_found")
@@ -223,19 +251,20 @@ def run_qwen(prompt: str, settings: QwenSettings) -> str:
 
     environment = os.environ.copy()
     environment["QWEN_CODE_SUPPRESS_YOLO_WARNING"] = "1"
-    prompts = [prompt, *([FORMAT_REMINDER] * MAX_INVALID_RESPONSE_RETRIES)]
+    reminder = TASK_FORMAT_REMINDER if response_kind == "task" else PHASE_SUMMARY_FORMAT_REMINDER
+    prompts = [prompt, *([reminder] * MAX_INVALID_RESPONSE_RETRIES)]
     for attempt, current_prompt in enumerate(prompts, start=1):
         command = build_command(settings)
         log_event(
             "invocation_started",
             model_source="qwen_user_settings",
-            project_root=str(PROJECT_ROOT),
+            project_root=str(workspace),
             attempt=attempt,
             format_retry=attempt > 1,
         )
         result = subprocess.run(
             command,
-            cwd=PROJECT_ROOT,
+            cwd=workspace,
             env=environment,
             input=current_prompt,
             text=True,
@@ -255,10 +284,12 @@ def run_qwen(prompt: str, settings: QwenSettings) -> str:
         final_text = response_text(result.stdout, settings.output_format)
         raise_for_qwen_api_error(final_text)
         try:
-            return extract_completion_response(final_text)
+            return extract_completion_response(final_text, response_kind)
         except RuntimeError:
             log_event("invalid_completion_response", attempt=attempt)
 
+    if response_kind == "phase-summary":
+        raise RuntimeError("Qwen Code did not produce a recognizable phase completion-summary JSON object")
     return json.dumps(
         {"task_status": "failed", "fail_reason": INVALID_RESPONSE_FAILURE_REASON},
         ensure_ascii=False,
@@ -270,12 +301,18 @@ def main(arguments: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("prompt", nargs="?", help="prompt text; read stdin when omitted")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--agent", default="default_task_agent")
+    parser.add_argument("--response-kind", choices=("task", "phase-summary"), default="task")
+    parser.add_argument("--project-workspace", type=Path, required=True)
     args = parser.parse_args(arguments)
     try:
         prompt = read_prompt(args.prompt)
         if not prompt.strip():
             raise ValueError("prompt cannot be empty")
-        print(run_qwen(prompt, read_settings(args.config)))
+        workspace = args.project_workspace.expanduser().resolve()
+        if not workspace.is_dir():
+            raise ValueError(f"project workspace does not exist: {workspace}")
+        print(run_qwen(prompt, read_settings(args.config, args.agent), workspace, args.response_kind))
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         log_event("invocation_failed", reason=str(error))
         print(f"qwen.py: {error}", file=sys.stderr)

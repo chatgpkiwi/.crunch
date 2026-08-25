@@ -1,25 +1,61 @@
-# Coding-agent configuration for task execution. Exactly one uncommented
-# `coding_agent` block is allowed. Supported providers are `aider`, `codex`,
-# and `qwen`.
+# Coding-agent configuration for task execution. The worker sends new tasks to
+# `default_task_agent` and tasks reset for retry to `retry_task_agent`.
+# Supported providers are `aider`, `codex`, and `qwen`.
 
-#coding_agent:
-#  provider: aider
-#  model: "openai/lemonade-qwen"
-#  openai-api-base: "http://127.0.0.1:4000"
-#  openai-api-key: "sk-local"
+# examples
 
-#### CODEX EXAMPLE
-coding_agent:
-  provider: codex
-  model: "5.6 Luna"
-  effort: low
+
+#### AIDER CODER EXAMPLE
+#    provider: aider
+#    model: "openai/Qwen3-Coder-Next-Q6_K_L"
+#    openai-api-base: "http://127.0.0.1:13305"
+#    openai-api-key: "sk-local"
 
 #### QWEN CODER EXAMPLE
-# Qwen reads authentication, provider, endpoint, and model selection from the
-# invoking user's Qwen settings (normally ~/.qwen/settings.json). .crunch only
-# controls unattended execution here.
-#coding_agent:
-#  provider: qwen
-#  output-format: stream-json # Optional: text, json, or stream-json (default).
-#  max-wall-time: "120m" # Optional Qwen Code limit.
-#  max-tool-calls: "500" # Optional Qwen Code limit.
+#    provider: qwen
+#    output-format: stream-json # Optional: text, json, or stream-json (default).
+#    max-wall-time: "120m" # Optional Qwen Code limit.
+#    max-tool-calls: "500" # Optional Qwen Code limit.
+
+#### CODEX EXAMPLE
+#    provider: codex
+#    model: "5.6 Luna"
+#    effort: medium
+
+#### CODEX WITH LOCAL LLM
+#    provider: codex
+#    model: local
+#    local-model: "Qwen3-Coder-Next-Q6_K_L"
+#    local-provider: lemonade
+#    local-provider-name: "Local Lemonade"
+#    local-base-url: "http://127.0.0.1:13305/v1"
+#    local-wire-api: responses
+#    local-context-window: 262144
+#    local-requires-openai-auth: false
+#    local-supports-websockets: false
+
+
+coding_agents:
+  # `model: local` runs Codex with --ignore-user-config and the explicit
+  # provider settings below, so Desktop plugins and MCP servers are excluded.
+  default_task_agent:
+    provider: codex
+    model: local
+    local-model: "Qwen3-Coder-Next-Q6_K_L"
+    local-provider: lemonade
+    local-provider-name: "Local Lemonade"
+    local-base-url: "http://127.0.0.1:13305/v1"
+    local-wire-api: responses
+    local-context-window: 262144
+    local-requires-openai-auth: false
+    local-supports-websockets: false
+  
+  retry_task_agent:
+    provider: codex
+    model: "5.6 Luna"
+    effort: low
+  
+  fix_bug_agent:
+    provider: codex
+    model: "5.6 Terra"
+    effort: low
